@@ -5,10 +5,3 @@ services:
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn smart_report:app
-    envVars:
-      - key: DATA_FILE
-        value: /data/bateria_data.json
-    disk:
-      name: smart-report-data
-      mountPath: /data
-      sizeGB: 1
