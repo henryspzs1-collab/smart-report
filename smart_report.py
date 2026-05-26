@@ -2,8 +2,72 @@ from flask import Flask, jsonify, request
 import json
 import os
 import socket
+import re
+import secrets
+import string
+from datetime import datetime
+import bcrypt
 
 app = Flask(__name__)
+
+
+# -------- Auth helpers --------
+def hash_password(plain: str) -> str:
+    return bcrypt.hashpw(plain.encode('utf-8'), bcrypt.gensalt(rounds=12)).decode('utf-8')
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    if not plain or not hashed:
+        return False
+    try:
+        return bcrypt.checkpw(plain.encode('utf-8'), hashed.encode('utf-8'))
+    except Exception:
+        return False
+
+
+def generate_temp_password(length: int = 10) -> str:
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+
+EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def is_valid_email(email: str) -> bool:
+    return bool(email and EMAIL_REGEX.match(email))
+
+
+def public_user_view(username: str, user: dict) -> dict:
+    """Retorna dados do usuário SEM o passwordHash."""
+    return {
+        "username": username,
+        "role": user.get("role", "user"),
+        "status": user.get("status", "active"),
+        "firstName": user.get("firstName", ""),
+        "lastName": user.get("lastName", ""),
+        "email": user.get("email", ""),
+        "phone": user.get("phone", ""),
+        "mustResetPassword": user.get("mustResetPassword", False),
+        "createdAt": user.get("createdAt", "")
+    }
+
+
+def ensure_user_fields(user: dict) -> dict:
+    """Garante que o dict de usuário tem todos os campos padrão."""
+    defaults = {
+        "role": "user",
+        "status": "active",
+        "firstName": "",
+        "lastName": "",
+        "email": "",
+        "phone": "",
+        "mustResetPassword": False,
+        "createdAt": datetime.utcnow().isoformat() + "Z"
+    }
+    for k, v in defaults.items():
+        if k not in user:
+            user[k] = v
+    return user
 
 # Arquivo onde os dados serão salvos permanentemente no seu PC
 # Em produção (Render), aponte para um disco persistente via variável de ambiente DATA_FILE
@@ -57,7 +121,17 @@ def load_data():
 
         data = {
             "users": {
-                "admin": {"password": "admin", "role": "admin"}
+                "admin": {
+                    "passwordHash": hash_password("admin"),
+                    "role": "admin",
+                    "status": "active",
+                    "firstName": "Administrador",
+                    "lastName": "",
+                    "email": "",
+                    "phone": "",
+                    "mustResetPassword": False,
+                    "createdAt": datetime.utcnow().isoformat() + "Z"
+                }
             },
             "globalConfig": {
                 "headerConfig": header_config,
@@ -76,6 +150,20 @@ def load_data():
         }
         save_data(data)
 
+    # Migração de usuários antigos (password em texto puro -> passwordHash)
+    changed = False
+    for uname, u in data.get("users", {}).items():
+        if "password" in u and "passwordHash" not in u:
+            u["passwordHash"] = hash_password(u["password"])
+            del u["password"]
+            changed = True
+        before = dict(u)
+        ensure_user_fields(u)
+        if u != before:
+            changed = True
+    if changed:
+        save_data(data)
+
     return data
 
 
@@ -86,18 +174,99 @@ def save_data(data):
 
 @app.route('/api/login', methods=['POST'])
 def login():
-    creds = request.json
-    username = creds.get('username')
-    password = creds.get('password')
+    creds = request.json or {}
+    username = (creds.get('username') or '').strip()
+    password = creds.get('password') or ''
     full_data = load_data()
 
-    if username in full_data['users'] and full_data['users'][username]['password'] == password:
-        return jsonify({
-            "success": True,
-            "token": username,
-            "role": full_data['users'][username]['role']
-        })
-    return jsonify({"success": False, "message": "Usuário ou senha incorretos."}), 401
+    user = full_data['users'].get(username)
+    if not user or not verify_password(password, user.get('passwordHash', '')):
+        return jsonify({"success": False, "message": "Usuário ou senha incorretos."}), 401
+
+    status = user.get('status', 'active')
+    if status == 'pending':
+        return jsonify({"success": False, "message": "Sua conta está aguardando aprovação do administrador."}), 403
+    if status == 'disabled':
+        return jsonify({"success": False, "message": "Sua conta foi desativada. Contate o administrador."}), 403
+
+    return jsonify({
+        "success": True,
+        "token": username,
+        "role": user['role'],
+        "firstName": user.get('firstName', ''),
+        "lastName": user.get('lastName', ''),
+        "mustResetPassword": user.get('mustResetPassword', False)
+    })
+
+
+@app.route('/api/register', methods=['POST'])
+def register():
+    """Cadastro público — cria conta como 'pending' até admin aprovar."""
+    data_in = request.json or {}
+    username = (data_in.get('username') or '').strip()
+    password = data_in.get('password') or ''
+    first = (data_in.get('firstName') or '').strip()
+    last = (data_in.get('lastName') or '').strip()
+    email = (data_in.get('email') or '').strip().lower()
+    phone = (data_in.get('phone') or '').strip()
+
+    # Validações
+    if not username or not re.match(r'^[a-zA-Z0-9_.-]{3,30}$', username):
+        return jsonify({"success": False, "message": "Login inválido. Use 3-30 caracteres (letras, números, . _ -)."}), 400
+    if not password or len(password) < 6:
+        return jsonify({"success": False, "message": "A senha deve ter no mínimo 6 caracteres."}), 400
+    if not first:
+        return jsonify({"success": False, "message": "Informe o nome."}), 400
+    if not last:
+        return jsonify({"success": False, "message": "Informe o sobrenome."}), 400
+    if not is_valid_email(email):
+        return jsonify({"success": False, "message": "E-mail inválido."}), 400
+    if not phone or len(re.sub(r'\D', '', phone)) < 8:
+        return jsonify({"success": False, "message": "Telefone inválido."}), 400
+
+    full_data = load_data()
+    if username in full_data['users']:
+        return jsonify({"success": False, "message": "Esse login já está em uso."}), 400
+    for u in full_data['users'].values():
+        if u.get('email', '').lower() == email and email:
+            return jsonify({"success": False, "message": "Esse e-mail já está cadastrado."}), 400
+
+    full_data['users'][username] = {
+        "passwordHash": hash_password(password),
+        "role": "user",
+        "status": "pending",
+        "firstName": first,
+        "lastName": last,
+        "email": email,
+        "phone": phone,
+        "mustResetPassword": False,
+        "createdAt": datetime.utcnow().isoformat() + "Z"
+    }
+    save_data(full_data)
+    return jsonify({"success": True, "message": "Conta criada! Aguarde a aprovação do administrador."})
+
+
+@app.route('/api/change-password', methods=['POST'])
+def change_password():
+    user = request.headers.get('Authorization')
+    full_data = load_data()
+    if not user or user not in full_data['users']:
+        return jsonify({"error": "Não autorizado"}), 401
+
+    body = request.json or {}
+    current = body.get('currentPassword') or ''
+    new = body.get('newPassword') or ''
+
+    u = full_data['users'][user]
+    if not verify_password(current, u.get('passwordHash', '')):
+        return jsonify({"success": False, "message": "Senha atual incorreta."}), 400
+    if len(new) < 6:
+        return jsonify({"success": False, "message": "A nova senha deve ter no mínimo 6 caracteres."}), 400
+
+    u['passwordHash'] = hash_password(new)
+    u['mustResetPassword'] = False
+    save_data(full_data)
+    return jsonify({"success": True})
 
 
 @app.route('/api/data', methods=['GET'])
@@ -150,34 +319,57 @@ def update_data():
     return jsonify({"status": "success"})
 
 
-@app.route('/api/users', methods=['GET', 'POST', 'DELETE'])
-def manage_users():
+def _require_admin():
     user = request.headers.get('Authorization')
     full_data = load_data()
-
     if not user or user not in full_data['users'] or full_data['users'][user]['role'] != 'admin':
-        return jsonify({"error": "Não autorizado"}), 401
+        return None, None, (jsonify({"error": "Não autorizado"}), 401)
+    return user, full_data, None
+
+
+@app.route('/api/users', methods=['GET', 'POST', 'DELETE'])
+def manage_users():
+    user, full_data, err = _require_admin()
+    if err:
+        return err
 
     if request.method == 'GET':
-        users_list = [{"username": k, "role": v["role"]} for k, v in full_data['users'].items()]
+        users_list = [public_user_view(k, v) for k, v in full_data['users'].items()]
         return jsonify(users_list)
 
     if request.method == 'POST':
-        new_user = request.json.get('username')
-        new_pass = request.json.get('password')
-        new_role = request.json.get('role', 'user')
+        body = request.json or {}
+        new_user = (body.get('username') or '').strip()
+        new_pass = body.get('password') or ''
+        new_role = body.get('role', 'user')
+        first = (body.get('firstName') or '').strip()
+        last = (body.get('lastName') or '').strip()
+        email = (body.get('email') or '').strip().lower()
+        phone = (body.get('phone') or '').strip()
 
         if not new_user or not new_pass:
             return jsonify({"error": "Preencha usuário e senha"}), 400
+        if len(new_pass) < 6:
+            return jsonify({"error": "A senha deve ter no mínimo 6 caracteres"}), 400
         if new_user in full_data['users']:
             return jsonify({"error": "Usuário já existe"}), 400
 
-        full_data['users'][new_user] = {"password": new_pass, "role": new_role}
+        full_data['users'][new_user] = {
+            "passwordHash": hash_password(new_pass),
+            "role": new_role,
+            "status": "active",
+            "firstName": first,
+            "lastName": last,
+            "email": email,
+            "phone": phone,
+            "mustResetPassword": False,
+            "createdAt": datetime.utcnow().isoformat() + "Z"
+        }
         save_data(full_data)
         return jsonify({"success": True})
 
     if request.method == 'DELETE':
-        target_user = request.json.get('username')
+        target_user = (request.json or {}).get('username')
         if target_user == user:
             return jsonify({"error": "Você não pode excluir a si mesmo"}), 400
 
@@ -188,6 +380,75 @@ def manage_users():
             save_data(full_data)
 
         return jsonify({"success": True})
+
+
+@app.route('/api/users/<username>/approve', methods=['POST'])
+def approve_user(username):
+    user, full_data, err = _require_admin()
+    if err:
+        return err
+    if username not in full_data['users']:
+        return jsonify({"error": "Usuário não encontrado"}), 404
+    full_data['users'][username]['status'] = 'active'
+    save_data(full_data)
+    return jsonify({"success": True})
+
+
+@app.route('/api/users/<username>/disable', methods=['POST'])
+def disable_user(username):
+    user, full_data, err = _require_admin()
+    if err:
+        return err
+    if username == user:
+        return jsonify({"error": "Você não pode desativar a si mesmo"}), 400
+    if username not in full_data['users']:
+        return jsonify({"error": "Usuário não encontrado"}), 404
+    full_data['users'][username]['status'] = 'disabled'
+    save_data(full_data)
+    return jsonify({"success": True})
+
+
+@app.route('/api/users/<username>/enable', methods=['POST'])
+def enable_user(username):
+    user, full_data, err = _require_admin()
+    if err:
+        return err
+    if username not in full_data['users']:
+        return jsonify({"error": "Usuário não encontrado"}), 404
+    full_data['users'][username]['status'] = 'active'
+    save_data(full_data)
+    return jsonify({"success": True})
+
+
+@app.route('/api/users/<username>/reset-password', methods=['POST'])
+def reset_password(username):
+    user, full_data, err = _require_admin()
+    if err:
+        return err
+    if username not in full_data['users']:
+        return jsonify({"error": "Usuário não encontrado"}), 404
+    temp = generate_temp_password()
+    full_data['users'][username]['passwordHash'] = hash_password(temp)
+    full_data['users'][username]['mustResetPassword'] = True
+    save_data(full_data)
+    return jsonify({"success": True, "tempPassword": temp})
+
+
+@app.route('/api/users/<username>/role', methods=['POST'])
+def change_role(username):
+    user, full_data, err = _require_admin()
+    if err:
+        return err
+    if username not in full_data['users']:
+        return jsonify({"error": "Usuário não encontrado"}), 404
+    new_role = (request.json or {}).get('role')
+    if new_role not in ('user', 'admin'):
+        return jsonify({"error": "Role inválido"}), 400
+    if username == user and new_role != 'admin':
+        return jsonify({"error": "Você não pode rebaixar a si mesmo"}), 400
+    full_data['users'][username]['role'] = new_role
+    save_data(full_data)
+    return jsonify({"success": True})
 
 
 HTML_PAGE = """
@@ -246,6 +507,11 @@ HTML_PAGE = """
             const [isLoaded, setIsLoaded] = useState(false);
             const [isSaving, setIsSaving] = useState(false);
             const [loginError, setLoginError] = useState("");
+            const [authMode, setAuthMode] = useState('login'); // 'login' | 'register'
+            const [registerMsg, setRegisterMsg] = useState({ type: '', text: '' });
+            const [mustChangePwd, setMustChangePwd] = useState(false);
+            const [pwdChangeMsg, setPwdChangeMsg] = useState("");
+            const [tempPasswordInfo, setTempPasswordInfo] = useState(null); // {username, password}
 
             // DADOS GLOBAIS (Admin dita as regras)
             const [headerConfig, setHeaderConfig] = useState([]);
@@ -375,13 +641,67 @@ HTML_PAGE = """
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ username, password })
-                }).then(r => r.json()).then(data => {
+                }).then(r => r.json().then(data => ({status: r.status, data}))).then(({status, data}) => {
                     if (data.success) {
-                        const newAuth = { token: data.token, role: data.role };
+                        const newAuth = { token: data.token, role: data.role, firstName: data.firstName, lastName: data.lastName };
                         localStorage.setItem('smartReportAuth', JSON.stringify(newAuth));
                         setAuth(newAuth);
+                        if (data.mustResetPassword) setMustChangePwd(true);
                     } else {
                         setLoginError(data.message || "Erro no login");
+                    }
+                }).catch(() => setLoginError("Erro de conexão"));
+            };
+
+            const handleRegister = (e) => {
+                e.preventDefault();
+                setRegisterMsg({ type: '', text: '' });
+                const f = e.target;
+                if (f.password.value !== f.confirmPassword.value) {
+                    setRegisterMsg({ type: 'error', text: 'As senhas não coincidem.' });
+                    return;
+                }
+                const payload = {
+                    username: f.username.value,
+                    password: f.password.value,
+                    firstName: f.firstName.value,
+                    lastName: f.lastName.value,
+                    email: f.email.value,
+                    phone: f.phone.value
+                };
+                fetch('/api/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                }).then(r => r.json()).then(data => {
+                    if (data.success) {
+                        setRegisterMsg({ type: 'success', text: data.message || 'Conta criada! Aguarde aprovação.' });
+                        f.reset();
+                    } else {
+                        setRegisterMsg({ type: 'error', text: data.message || 'Erro ao cadastrar.' });
+                    }
+                }).catch(() => setRegisterMsg({ type: 'error', text: 'Erro de conexão' }));
+            };
+
+            const handleChangePassword = (e) => {
+                e.preventDefault();
+                setPwdChangeMsg("");
+                const f = e.target;
+                if (f.newPassword.value !== f.confirmPassword.value) {
+                    setPwdChangeMsg("As senhas não coincidem.");
+                    return;
+                }
+                fetch('/api/change-password', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                    body: JSON.stringify({ currentPassword: f.currentPassword.value, newPassword: f.newPassword.value })
+                }).then(r => r.json()).then(data => {
+                    if (data.success) {
+                        setMustChangePwd(false);
+                        f.reset();
+                        setPwdChangeMsg("");
+                    } else {
+                        setPwdChangeMsg(data.message || "Erro ao trocar senha");
                     }
                 });
             };
@@ -396,23 +716,108 @@ HTML_PAGE = """
             if (!auth) {
                 return html`
                     <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
-                        <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-sm">
-                            <div className="text-center mb-8">
+                        <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-md">
+                            <div className="text-center mb-6">
                                 <i className="ph-fill ph-device-mobile text-blue-600 text-5xl mb-2"></i>
                                 <h1 className="text-2xl font-bold text-slate-800">Biodron Smart Report Pro</h1>
-                                <p className="text-sm text-slate-500">Faça login para acessar seu painel</p>
+                                <p className="text-sm text-slate-500">${authMode === 'login' ? 'Faça login para acessar seu painel' : 'Crie sua conta — aguarde aprovação do administrador'}</p>
                             </div>
-                            <form onSubmit=${handleLogin} className="space-y-4">
+
+                            <div className="flex bg-slate-100 p-1 rounded-lg mb-6">
+                                <button type="button" onClick=${() => { setAuthMode('login'); setRegisterMsg({type:'',text:''}); setLoginError(''); }} className=${`flex-1 py-2 rounded-md text-sm font-medium transition ${authMode === 'login' ? 'bg-white text-blue-700 shadow' : 'text-slate-600'}`}>Entrar</button>
+                                <button type="button" onClick=${() => { setAuthMode('register'); setRegisterMsg({type:'',text:''}); setLoginError(''); }} className=${`flex-1 py-2 rounded-md text-sm font-medium transition ${authMode === 'register' ? 'bg-white text-blue-700 shadow' : 'text-slate-600'}`}>Criar conta</button>
+                            </div>
+
+                            ${authMode === 'login' ? html`
+                                <form onSubmit=${handleLogin} className="space-y-4">
+                                    <div>
+                                        <label className="block text-sm font-medium text-slate-700 mb-1">Usuário</label>
+                                        <input name="username" type="text" required className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Digite seu usuário" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-slate-700 mb-1">Senha</label>
+                                        <input name="password" type="password" required className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="••••••••" />
+                                    </div>
+                                    ${loginError && html`<div className="text-red-500 text-sm font-medium text-center bg-red-50 p-2 rounded">${loginError}</div>`}
+                                    <button type="submit" className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold p-3 rounded-lg transition mt-2">Entrar no Sistema</button>
+                                </form>
+                            ` : html`
+                                <form onSubmit=${handleRegister} className="space-y-3">
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label className="block text-xs font-medium text-slate-700 mb-1">Nome *</label>
+                                            <input name="firstName" type="text" required className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-medium text-slate-700 mb-1">Sobrenome *</label>
+                                            <input name="lastName" type="text" required className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm" />
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-medium text-slate-700 mb-1">E-mail *</label>
+                                        <input name="email" type="email" required className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm" placeholder="voce@email.com" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-medium text-slate-700 mb-1">Telefone *</label>
+                                        <input name="phone" type="tel" required className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm" placeholder="(11) 99999-9999"
+                                            onInput=${(e) => {
+                                                let v = e.target.value.replace(/\\D/g, '').slice(0, 11);
+                                                if (v.length > 6) v = '(' + v.slice(0,2) + ') ' + v.slice(2,7) + '-' + v.slice(7);
+                                                else if (v.length > 2) v = '(' + v.slice(0,2) + ') ' + v.slice(2);
+                                                e.target.value = v;
+                                            }} />
+                                    </div>
+                                    <div className="border-t border-slate-200 pt-3 mt-3">
+                                        <label className="block text-xs font-medium text-slate-700 mb-1">Login (nome de usuário) *</label>
+                                        <input name="username" type="text" required pattern="[a-zA-Z0-9_.-]{3,30}" title="3-30 caracteres: letras, números, . _ -" className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm" placeholder="ex: jose.silva" />
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label className="block text-xs font-medium text-slate-700 mb-1">Senha * (min. 6)</label>
+                                            <input name="password" type="password" required minLength="6" className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-medium text-slate-700 mb-1">Confirmar senha *</label>
+                                            <input name="confirmPassword" type="password" required minLength="6" className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm" />
+                                        </div>
+                                    </div>
+                                    ${registerMsg.text && html`
+                                        <div className=${`text-sm font-medium text-center p-2 rounded ${registerMsg.type === 'success' ? 'text-green-700 bg-green-50' : 'text-red-600 bg-red-50'}`}>${registerMsg.text}</div>
+                                    `}
+                                    <button type="submit" className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold p-3 rounded-lg transition mt-2">Criar Conta</button>
+                                </form>
+                            `}
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Tela obrigatória de troca de senha (após login com senha temporária)
+            if (mustChangePwd) {
+                return html`
+                    <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+                        <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-sm">
+                            <div className="text-center mb-6">
+                                <i className="ph-fill ph-lock-key text-amber-600 text-5xl mb-2"></i>
+                                <h1 className="text-xl font-bold text-slate-800">Troca de Senha Obrigatória</h1>
+                                <p className="text-sm text-slate-500 mt-1">Sua senha foi resetada pelo administrador. Defina uma nova senha pra continuar.</p>
+                            </div>
+                            <form onSubmit=${handleChangePassword} className="space-y-3">
                                 <div>
-                                    <label className="block text-sm font-medium text-slate-700 mb-1">Usuário</label>
-                                    <input name="username" type="text" required className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Digite seu usuário" />
+                                    <label className="block text-sm font-medium text-slate-700 mb-1">Senha atual (a temporária)</label>
+                                    <input name="currentPassword" type="password" required className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-slate-700 mb-1">Senha</label>
-                                    <input name="password" type="password" required className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="••••••••" />
+                                    <label className="block text-sm font-medium text-slate-700 mb-1">Nova senha (min. 6)</label>
+                                    <input name="newPassword" type="password" required minLength="6" className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
                                 </div>
-                                ${loginError && html`<div className="text-red-500 text-sm font-medium text-center bg-red-50 p-2 rounded">${loginError}</div>`}
-                                <button type="submit" className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold p-3 rounded-lg transition mt-2">Entrar no Sistema</button>
+                                <div>
+                                    <label className="block text-sm font-medium text-slate-700 mb-1">Confirmar nova senha</label>
+                                    <input name="confirmPassword" type="password" required minLength="6" className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
+                                </div>
+                                ${pwdChangeMsg && html`<div className="text-red-600 text-sm font-medium text-center bg-red-50 p-2 rounded">${pwdChangeMsg}</div>`}
+                                <button type="submit" className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold p-3 rounded-lg transition">Salvar Nova Senha</button>
+                                <button type="button" onClick=${handleLogout} className="w-full text-sm text-slate-500 hover:text-slate-700 mt-2">Sair</button>
                             </form>
                         </div>
                     </div>
@@ -988,19 +1393,28 @@ HTML_PAGE = """
             const renderUsers = () => {
                 const handleAddUser = (e) => {
                     e.preventDefault();
-                    const newU = e.target.newUser.value;
-                    const newP = e.target.newPass.value;
-                    const newR = e.target.newRole.value;
+                    const f = e.target;
+                    const payload = {
+                        username: f.newUser.value,
+                        password: f.newPass.value,
+                        role: f.newRole.value,
+                        firstName: f.firstName.value,
+                        lastName: f.lastName.value,
+                        email: f.email.value,
+                        phone: f.phone.value
+                    };
                     fetch('/api/users', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
-                        body: JSON.stringify({ username: newU, password: newP, role: newR })
+                        body: JSON.stringify(payload)
                     }).then(r => r.json()).then(d => {
-                        if(d.success) { e.target.reset(); fetchUsers(); }
+                        if(d.success) { f.reset(); fetchUsers(); }
+                        else alert(d.error || 'Erro ao criar usuário');
                     });
                 };
 
                 const handleDeleteUser = (u) => {
+                    if(!confirm(`Excluir definitivamente o usuário "${u}"? Esta ação não pode ser desfeita.`)) return;
                     fetch('/api/users', {
                         method: 'DELETE',
                         headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
@@ -1008,43 +1422,123 @@ HTML_PAGE = """
                     }).then(r => r.json()).then(d => { if(d.success) fetchUsers(); });
                 };
 
+                const callUserAction = (username, action, opts = {}) => {
+                    fetch(`/api/users/${encodeURIComponent(username)}/${action}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                        body: JSON.stringify(opts.body || {})
+                    }).then(r => r.json()).then(d => {
+                        if (d.success) {
+                            if (action === 'reset-password' && d.tempPassword) {
+                                setTempPasswordInfo({ username, password: d.tempPassword });
+                            }
+                            fetchUsers();
+                        } else {
+                            alert(d.error || 'Erro');
+                        }
+                    });
+                };
+
+                const pending = usersList.filter(u => u.status === 'pending');
+                const active = usersList.filter(u => u.status !== 'pending');
+
+                const statusBadge = (s) => {
+                    const map = {
+                        'active': { c: 'bg-green-100 text-green-700', t: 'Ativo' },
+                        'pending': { c: 'bg-amber-100 text-amber-700', t: 'Pendente' },
+                        'disabled': { c: 'bg-slate-200 text-slate-500', t: 'Desativado' }
+                    };
+                    const x = map[s] || map.active;
+                    return html`<span className=${`px-2 py-0.5 rounded text-xs font-bold ${x.c}`}>${x.t}</span>`;
+                };
+
                 return html`
-                    <div className="space-y-8 animate-in fade-in duration-300">
+                    <div className="space-y-6 animate-in fade-in duration-300">
+                        ${pending.length > 0 && html`
+                            <div className="bg-amber-50 border-2 border-amber-300 p-5 rounded-xl">
+                                <h2 className="text-lg font-semibold mb-3 text-amber-900 flex items-center gap-2">
+                                    <i className="ph-fill ph-user-circle-plus text-amber-600 text-2xl"></i> Cadastros pendentes de aprovação (${pending.length})
+                                </h2>
+                                <div className="space-y-3">
+                                    ${pending.map(u => html`
+                                        <div key=${u.username} className="bg-white border border-amber-200 rounded-lg p-4 flex flex-col md:flex-row md:items-center gap-3 justify-between">
+                                            <div className="flex-1">
+                                                <div className="font-bold text-slate-800">${u.firstName} ${u.lastName} <span className="text-slate-400 font-normal">(${u.username})</span></div>
+                                                <div className="text-xs text-slate-500 mt-1 flex flex-wrap gap-x-3 gap-y-1">
+                                                    <span><i className="ph ph-envelope"></i> ${u.email}</span>
+                                                    <span><i className="ph ph-phone"></i> ${u.phone}</span>
+                                                </div>
+                                            </div>
+                                            <div className="flex gap-2">
+                                                <button onClick=${() => callUserAction(u.username, 'approve')} className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded font-medium text-sm flex items-center gap-1"><i className="ph-bold ph-check"></i> Aprovar</button>
+                                                <button onClick=${() => handleDeleteUser(u.username)} className="bg-red-100 hover:bg-red-200 text-red-700 px-4 py-2 rounded font-medium text-sm flex items-center gap-1"><i className="ph-bold ph-x"></i> Rejeitar</button>
+                                            </div>
+                                        </div>
+                                    `)}
+                                </div>
+                            </div>
+                        `}
+
                         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                             <h2 className="text-xl font-semibold mb-4 text-slate-800 flex items-center gap-2">
-                                <i className="ph-fill ph-users text-blue-600 text-2xl"></i> Novo Usuário
+                                <i className="ph-fill ph-user-plus text-blue-600 text-2xl"></i> Criar Usuário Manualmente
                             </h2>
-                            <form onSubmit=${handleAddUser} className="flex flex-col md:flex-row gap-4">
-                                <input name="newUser" required type="text" placeholder="Nome de usuário (Login)" className="flex-1 p-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-500 outline-none" />
-                                <input name="newPass" required type="text" placeholder="Senha" className="flex-1 p-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-500 outline-none" />
+                            <form onSubmit=${handleAddUser} className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                <input name="firstName" required type="text" placeholder="Nome" className="p-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-500 outline-none" />
+                                <input name="lastName" required type="text" placeholder="Sobrenome" className="p-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-500 outline-none" />
+                                <input name="email" type="email" placeholder="E-mail" className="p-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-500 outline-none" />
+                                <input name="phone" type="tel" placeholder="Telefone" className="p-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-500 outline-none" />
+                                <input name="newUser" required type="text" placeholder="Login (nome de usuário)" className="p-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-500 outline-none" />
+                                <input name="newPass" required type="text" minLength="6" placeholder="Senha (min. 6 caracteres)" className="p-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-500 outline-none" />
                                 <select name="newRole" className="p-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-500 outline-none bg-white">
                                     <option value="user">Usuário Padrão</option>
                                     <option value="admin">Administrador</option>
                                 </select>
-                                <button type="submit" className="bg-blue-600 text-white px-6 py-2 rounded font-medium hover:bg-blue-700">Criar</button>
+                                <button type="submit" className="bg-blue-600 text-white px-6 py-2 rounded font-medium hover:bg-blue-700">Criar Usuário</button>
                             </form>
                         </div>
 
                         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                             <h2 className="text-xl font-semibold mb-4 text-slate-800 flex items-center gap-2">
-                                <i className="ph-fill ph-list text-slate-600 text-2xl"></i> Usuários do Sistema
+                                <i className="ph-fill ph-list text-slate-600 text-2xl"></i> Usuários do Sistema (${active.length})
                             </h2>
-                            <div className="overflow-hidden rounded-lg border border-slate-200">
-                                <table className="min-w-full text-left text-sm whitespace-nowrap">
+                            <div className="overflow-x-auto rounded-lg border border-slate-200">
+                                <table className="min-w-full text-left text-sm">
                                     <thead className="bg-slate-100 border-b border-slate-200 text-slate-700">
-                                        <tr><th className="p-4 font-bold">Usuário</th><th className="p-4 font-bold">Acesso</th><th className="p-4 font-bold text-right">Ações</th></tr>
+                                        <tr>
+                                            <th className="p-3 font-bold">Nome</th>
+                                            <th className="p-3 font-bold">Login</th>
+                                            <th className="p-3 font-bold">Contato</th>
+                                            <th className="p-3 font-bold">Acesso</th>
+                                            <th className="p-3 font-bold">Status</th>
+                                            <th className="p-3 font-bold text-right">Ações</th>
+                                        </tr>
                                     </thead>
                                     <tbody className="divide-y divide-slate-100">
-                                        ${usersList.map(u => html`
+                                        ${active.map(u => html`
                                             <tr key=${u.username} className="hover:bg-slate-50">
-                                                <td className="p-4 font-medium">${u.username}</td>
-                                                <td className="p-4">
-                                                    <span className=${`px-2 py-1 rounded text-xs font-bold ${u.role==='admin'?'bg-indigo-100 text-indigo-700':'bg-slate-200 text-slate-700'}`}>${u.role.toUpperCase()}</span>
+                                                <td className="p-3 font-medium whitespace-nowrap">${u.firstName} ${u.lastName}${u.username === auth.token ? html` <span className="text-xs text-slate-400 ml-1">(você)</span>` : ''}</td>
+                                                <td className="p-3 font-mono text-xs">${u.username}</td>
+                                                <td className="p-3 text-xs text-slate-600">
+                                                    ${u.email && html`<div><i className="ph ph-envelope"></i> ${u.email}</div>`}
+                                                    ${u.phone && html`<div><i className="ph ph-phone"></i> ${u.phone}</div>`}
                                                 </td>
-                                                <td className="p-4 text-right">
-                                                    ${u.username !== auth.token ? html`
-                                                        <button onClick=${() => handleDeleteUser(u.username)} className="text-red-500 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded font-medium transition">Excluir</button>
-                                                    ` : html`<span className="text-slate-400 text-xs">(Você)</span>`}
+                                                <td className="p-3">
+                                                    <span className=${`px-2 py-0.5 rounded text-xs font-bold ${u.role==='admin'?'bg-indigo-100 text-indigo-700':'bg-slate-200 text-slate-700'}`}>${u.role.toUpperCase()}</span>
+                                                </td>
+                                                <td className="p-3">${statusBadge(u.status)}</td>
+                                                <td className="p-3 text-right whitespace-nowrap">
+                                                    <div className="flex justify-end gap-1 flex-wrap">
+                                                        <button title="Resetar senha" onClick=${() => callUserAction(u.username, 'reset-password')} className="text-amber-700 bg-amber-50 hover:bg-amber-100 px-2 py-1 rounded text-xs font-medium"><i className="ph-bold ph-key"></i></button>
+                                                        ${u.username !== auth.token && (u.status === 'active' ? html`
+                                                            <button title="Desativar" onClick=${() => callUserAction(u.username, 'disable')} className="text-slate-700 bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded text-xs font-medium"><i className="ph-bold ph-pause"></i></button>
+                                                        ` : html`
+                                                            <button title="Reativar" onClick=${() => callUserAction(u.username, 'enable')} className="text-green-700 bg-green-50 hover:bg-green-100 px-2 py-1 rounded text-xs font-medium"><i className="ph-bold ph-play"></i></button>
+                                                        `)}
+                                                        ${u.username !== auth.token && html`
+                                                            <button title="Excluir" onClick=${() => handleDeleteUser(u.username)} className="text-red-700 bg-red-50 hover:bg-red-100 px-2 py-1 rounded text-xs font-medium"><i className="ph-bold ph-trash"></i></button>
+                                                        `}
+                                                    </div>
                                                 </td>
                                             </tr>
                                         `)}
@@ -1197,6 +1691,26 @@ HTML_PAGE = """
                                     <button onClick=${() => cameraInputRef.current.click()} className="w-full flex items-center justify-center gap-3 bg-blue-600 hover:bg-blue-700 text-white p-4 rounded-xl font-medium transition shadow-sm"><i className="ph-fill ph-camera text-2xl"></i> Tirar Foto (Câmera)</button>
                                     <button onClick=${() => galleryInputRef.current.click()} className="w-full flex items-center justify-center gap-3 bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 p-4 rounded-xl font-medium transition"><i className="ph-fill ph-image text-2xl"></i> Importar da Galeria</button>
                                     <button onClick=${() => setSourceModalOpen(false)} className="w-full mt-2 p-3 text-red-500 font-medium hover:bg-red-50 rounded-xl transition">Cancelar</button>
+                                </div>
+                            </div>
+                        </div>
+                    `}
+
+                    ${tempPasswordInfo && html`
+                        <div className="print:hidden fixed inset-0 bg-slate-900/80 z-[80] flex items-center justify-center p-4">
+                            <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-6">
+                                <div className="text-center mb-4">
+                                    <i className="ph-fill ph-key text-amber-500 text-5xl"></i>
+                                    <h3 className="text-xl font-bold text-slate-800 mt-2">Senha Temporária Gerada</h3>
+                                    <p className="text-sm text-slate-500">Repasse para <b>${tempPasswordInfo.username}</b>. Esta senha aparece só uma vez.</p>
+                                </div>
+                                <div className="bg-slate-100 border-2 border-dashed border-slate-300 p-4 rounded-lg text-center mb-4">
+                                    <code className="text-2xl font-mono font-bold text-slate-800 tracking-wider select-all">${tempPasswordInfo.password}</code>
+                                </div>
+                                <p className="text-xs text-slate-500 mb-4 bg-amber-50 border border-amber-200 p-2 rounded"><i className="ph-fill ph-info text-amber-600"></i> No próximo login, o usuário será forçado a definir uma nova senha.</p>
+                                <div className="flex gap-2">
+                                    <button onClick=${() => { navigator.clipboard?.writeText(tempPasswordInfo.password); }} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 p-3 rounded-lg font-medium"><i className="ph ph-copy"></i> Copiar</button>
+                                    <button onClick=${() => setTempPasswordInfo(null)} className="flex-1 bg-blue-600 hover:bg-blue-700 text-white p-3 rounded-lg font-medium">Fechar</button>
                                 </div>
                             </div>
                         </div>
