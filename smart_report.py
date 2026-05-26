@@ -196,7 +196,7 @@ HTML_PAGE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Smart Report - Baterias</title>
+    <title>Biodron Smart Report Pro - Baterias</title>
 
     <script src="https://cdn.tailwindcss.com"></script>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -399,7 +399,7 @@ HTML_PAGE = """
                         <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-sm">
                             <div className="text-center mb-8">
                                 <i className="ph-fill ph-device-mobile text-blue-600 text-5xl mb-2"></i>
-                                <h1 className="text-2xl font-bold text-slate-800">Smart Report</h1>
+                                <h1 className="text-2xl font-bold text-slate-800">Biodron Smart Report Pro</h1>
                                 <p className="text-sm text-slate-500">Faça login para acessar seu painel</p>
                             </div>
                             <form onSubmit=${handleLogin} className="space-y-4">
@@ -1156,7 +1156,7 @@ HTML_PAGE = """
                     <div className="print:hidden max-w-5xl mx-auto p-4 md:p-6 pb-24">
                         <header className="mb-6 flex flex-col md:flex-row md:items-center justify-between gap-4 bg-slate-900 text-white p-4 md:p-6 rounded-2xl shadow-lg">
                             <div className="flex flex-col">
-                                <h1 className="text-2xl font-bold flex items-center gap-2"><i className="ph-fill ph-device-mobile text-blue-400"></i> Smart Report Pro</h1>
+                                <h1 className="text-2xl font-bold flex items-center gap-2"><i className="ph-fill ph-device-mobile text-blue-400"></i> Biodron Smart Report Pro</h1>
                                 <span className="text-slate-400 text-sm mt-1 flex items-center gap-2">
                                     <i className="ph-fill ph-user-circle"></i> Olá, <b className="text-white">${auth.token}</b>
                                     <button onClick=${handleLogout} className="ml-2 text-red-400 hover:text-red-300 underline font-medium text-xs">Sair da Conta</button>
@@ -1261,7 +1261,7 @@ if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5001))
     ip_local = get_local_ip()
     print("\n" + "=" * 50)
-    print("🚀 SERVIDOR SMART REPORT PRO (MULTI-USER) INICIADO!")
+    print("🚀 SERVIDOR BIODRON SMART REPORT PRO (MULTI-USER) INICIADO!")
     print("=" * 50)
     print(f"👉 Acessar no PC: http://localhost:{port}")
     print(f"📱 Acessar no CELULAR: http://{ip_local}:{port}")
