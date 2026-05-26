@@ -1218,36 +1218,39 @@ HTML_PAGE = """
             };
 
             // ---- helpers Omie search ----
-            const [searchMsg, setSearchMsg] = useState('');
+            const [clienteMsg, setClienteMsg] = useState('');
+            const [servicoMsg, setServicoMsg] = useState('');
+            const [produtoMsg, setProdutoMsg] = useState('');
+
             const searchClientes = (q) => {
-                setSearchMsg('Buscando...');
+                setClienteMsg('Buscando...');
                 fetch(`/api/omie/clientes?q=${encodeURIComponent(q || '')}`, { headers: { 'Authorization': auth.token } })
                     .then(r => r.json()).then(d => {
                         setClienteResults(d.items || []);
-                        if (d.error) setSearchMsg('Erro: ' + d.error);
-                        else if (!d.items || d.items.length === 0) setSearchMsg('Nenhum cliente encontrado no Omie.');
-                        else setSearchMsg('');
-                    }).catch(() => setSearchMsg('Erro de conexão'));
+                        if (d.error) setClienteMsg('Erro: ' + d.error);
+                        else if (!d.items || d.items.length === 0) setClienteMsg('Nenhum cliente encontrado no Omie.');
+                        else setClienteMsg('');
+                    }).catch(() => setClienteMsg('Erro de conexão'));
             };
             const searchServicos = (q) => {
-                setSearchMsg('Buscando...');
+                setServicoMsg('Buscando...');
                 fetch(`/api/omie/servicos?q=${encodeURIComponent(q || '')}`, { headers: { 'Authorization': auth.token } })
                     .then(r => r.json()).then(d => {
                         setServicoResults(d.items || []);
-                        if (d.error) setSearchMsg('Erro: ' + d.error);
-                        else if (!d.items || d.items.length === 0) setSearchMsg('Nenhum serviço encontrado no catálogo Omie.');
-                        else setSearchMsg(`${d.items.length} serviço(s) encontrado(s).`);
-                    }).catch(() => setSearchMsg('Erro de conexão'));
+                        if (d.error) setServicoMsg('Erro: ' + d.error);
+                        else if (!d.items || d.items.length === 0) setServicoMsg('Nenhum serviço encontrado no catálogo Omie.');
+                        else setServicoMsg(`${d.items.length} serviço(s) encontrado(s).`);
+                    }).catch(() => setServicoMsg('Erro de conexão'));
             };
             const searchProdutos = (q) => {
-                setSearchMsg('Buscando...');
+                setProdutoMsg('Buscando...');
                 fetch(`/api/omie/produtos?q=${encodeURIComponent(q || '')}`, { headers: { 'Authorization': auth.token } })
                     .then(r => r.json()).then(d => {
                         setProdutoResults(d.items || []);
-                        if (d.error) setSearchMsg('Erro: ' + d.error);
-                        else if (!d.items || d.items.length === 0) setSearchMsg('Nenhuma peça encontrada no catálogo Omie.');
-                        else setSearchMsg(`${d.items.length} peça(s) encontrada(s).`);
-                    }).catch(() => setSearchMsg('Erro de conexão'));
+                        if (d.error) setProdutoMsg('Erro: ' + d.error);
+                        else if (!d.items || d.items.length === 0) setProdutoMsg('Nenhuma peça encontrada no catálogo Omie.');
+                        else setProdutoMsg(`${d.items.length} peça(s) encontrada(s).`);
+                    }).catch(() => setProdutoMsg('Erro de conexão'));
             };
 
             const createOmieCliente = (data) => {
@@ -2246,7 +2249,7 @@ HTML_PAGE = """
                                             <button onClick=${() => searchClientes(clienteSearch)} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded font-medium"><i className="ph-bold ph-magnifying-glass"></i></button>
                                             <button onClick=${() => setShowNewClienteModal(true)} className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded font-medium" title="Cadastrar novo cliente no Omie"><i className="ph-bold ph-plus"></i></button>
                                         </div>
-                                        ${searchMsg && html`<div className="text-xs text-slate-600 italic">${searchMsg}</div>`}
+                                        ${clienteMsg && html`<div className="text-xs text-slate-600 italic">${clienteMsg}</div>`}
                                         ${clienteResults.length > 0 && html`
                                             <div className="border border-slate-200 rounded divide-y divide-slate-100 max-h-60 overflow-y-auto">
                                                 ${clienteResults.map(c => html`
@@ -2281,7 +2284,7 @@ HTML_PAGE = """
                                                             <input type="text" placeholder="Buscar serviço no Omie..." value=${servicoSearch.forIndex === i ? servicoSearch.q : (s.description || '')} onChange=${(e) => setServicoSearch({ q: e.target.value, forIndex: i })} className="flex-1 p-2 border border-slate-300 rounded text-sm" disabled=${isLocked} />
                                                             ${!isLocked && html`<button onClick=${() => searchServicos(servicoSearch.forIndex === i ? servicoSearch.q : (s.description || ''))} className="bg-blue-600 text-white px-3 rounded text-sm"><i className="ph-bold ph-magnifying-glass"></i></button>`}
                                                         </div>
-                                                        ${servicoSearch.forIndex === i && searchMsg && html`<div className="text-xs text-slate-600 italic">${searchMsg}</div>`}
+                                                        ${servicoSearch.forIndex === i && servicoMsg && html`<div className="text-xs text-slate-600 italic">${servicoMsg}</div>`}
                                                         ${servicoSearch.forIndex === i && servicoResults.length > 0 && html`
                                                             <div className="border border-slate-200 rounded divide-y divide-slate-100 max-h-40 overflow-y-auto bg-white">
                                                                 ${servicoResults.map(sr => html`
@@ -2326,7 +2329,7 @@ HTML_PAGE = """
                                                             <input type="text" placeholder="Buscar peça no Omie..." value=${produtoSearch.forIndex === i ? produtoSearch.q : (p.description || '')} onChange=${(e) => setProdutoSearch({ q: e.target.value, forIndex: i })} className="flex-1 p-2 border border-slate-300 rounded text-sm" disabled=${isLocked} />
                                                             ${!isLocked && html`<button onClick=${() => searchProdutos(produtoSearch.forIndex === i ? produtoSearch.q : (p.description || ''))} className="bg-blue-600 text-white px-3 rounded text-sm"><i className="ph-bold ph-magnifying-glass"></i></button>`}
                                                         </div>
-                                                        ${produtoSearch.forIndex === i && searchMsg && html`<div className="text-xs text-slate-600 italic">${searchMsg}</div>`}
+                                                        ${produtoSearch.forIndex === i && produtoMsg && html`<div className="text-xs text-slate-600 italic">${produtoMsg}</div>`}
                                                         ${produtoSearch.forIndex === i && produtoResults.length > 0 && html`
                                                             <div className="border border-slate-200 rounded divide-y divide-slate-100 max-h-40 overflow-y-auto bg-white">
                                                                 ${produtoResults.map(pr => html`
