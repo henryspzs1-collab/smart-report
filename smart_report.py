@@ -605,32 +605,53 @@ def omie_servicos():
     user, full_data, err = _require_user()
     if err:
         return err
-    q = (request.args.get('q') or '').strip()
-    page = int(request.args.get('page', 1))
+    q = (request.args.get('q') or '').strip().lower()
+    # Normaliza acentos pra comparação flexível
+    import unicodedata
+    def _norm(s):
+        s = unicodedata.normalize('NFD', (s or '').lower())
+        return ''.join(c for c in s if unicodedata.category(c) != 'Mn')
+    q_norm = _norm(q)
+
     try:
-        param = {
-            "pagina": page,
-            "registros_por_pagina": 20,
-            "filtrar_apenas_omiepdv": "N"
-        }
-        data = omie_call('/servicos/servico/', 'ListarCadastroServico', param)
         servicos = []
-        for s in data.get('cadastros', []):
-            intern = s.get('intItem', {}) or {}
-            cab = s.get('cabecalho', {}) or {}
-            desc = cab.get('descricao') or intern.get('descricao_servico') or ''
-            if q and q.lower() not in (desc or '').lower() and q.lower() not in (cab.get('codigo') or '').lower():
-                continue
-            servicos.append({
-                "id": intern.get('nCodServ'),
-                "code": cab.get('codigo'),
-                "description": desc,
-                "unitPrice": float(cab.get('valor_unitario') or 0)
+        max_pages = 10  # cap para evitar abuso
+        cap_results = 50
+        page = 1
+        while page <= max_pages:
+            data = omie_call('/servicos/servico/', 'ListarCadastroServico', {
+                "pagina": page,
+                "registros_por_pagina": 50,
+                "filtrar_apenas_omiepdv": "N"
             })
+            registros = data.get('cadastros', []) or []
+            for s in registros:
+                intern = s.get('intItem', {}) or {}
+                cab = s.get('cabecalho', {}) or {}
+                desc = cab.get('descricao') or intern.get('descricao_servico') or ''
+                code = cab.get('codigo') or ''
+                if q_norm:
+                    desc_norm = _norm(desc)
+                    code_norm = _norm(code)
+                    if q_norm not in desc_norm and q_norm not in code_norm:
+                        continue
+                servicos.append({
+                    "id": intern.get('nCodServ'),
+                    "code": code,
+                    "description": desc,
+                    "unitPrice": float(cab.get('valor_unitario') or 0)
+                })
+                if len(servicos) >= cap_results:
+                    break
+            if len(servicos) >= cap_results:
+                break
+            total_pages = data.get('total_de_paginas', 1) or 1
+            if page >= total_pages:
+                break
+            page += 1
         return jsonify({
             "items": servicos,
-            "page": data.get('pagina', page),
-            "totalPages": data.get('total_de_paginas', 1)
+            "totalFound": len(servicos)
         })
     except OmieError as e:
         return jsonify({"error": str(e)}), e.status
@@ -641,31 +662,55 @@ def omie_produtos():
     user, full_data, err = _require_user()
     if err:
         return err
-    q = (request.args.get('q') or '').strip()
-    page = int(request.args.get('page', 1))
+    q = (request.args.get('q') or '').strip().lower()
+    import unicodedata
+    def _norm(s):
+        s = unicodedata.normalize('NFD', (s or '').lower())
+        return ''.join(c for c in s if unicodedata.category(c) != 'Mn')
+    q_norm = _norm(q)
+
     try:
-        param = {
-            "pagina": page,
-            "registros_por_pagina": 20,
-            "apenas_importado_api": "N",
-            "filtrar_apenas_omiepdv": "N"
-        }
-        if q:
-            param["filtrar_por_descricao"] = q
-        data = omie_call('/geral/produtos/', 'ListarProdutos', param)
         produtos = []
-        for p in data.get('produto_servico_cadastro', []):
-            produtos.append({
-                "id": p.get('codigo_produto'),
-                "code": p.get('codigo'),
-                "description": p.get('descricao'),
-                "unit": p.get('unidade'),
-                "unitPrice": float(p.get('valor_unitario') or 0)
-            })
+        max_pages = 10
+        cap_results = 50
+        page = 1
+        while page <= max_pages:
+            param = {
+                "pagina": page,
+                "registros_por_pagina": 50,
+                "apenas_importado_api": "N",
+                "filtrar_apenas_omiepdv": "N"
+            }
+            # Tenta passar o filtro nativo do Omie também (acelera quando funciona)
+            if q:
+                param["filtrar_por_descricao"] = q
+            data = omie_call('/geral/produtos/', 'ListarProdutos', param)
+            for p in data.get('produto_servico_cadastro', []) or []:
+                desc = p.get('descricao') or ''
+                code = p.get('codigo') or ''
+                if q_norm:
+                    desc_norm = _norm(desc)
+                    code_norm = _norm(code)
+                    if q_norm not in desc_norm and q_norm not in code_norm:
+                        continue
+                produtos.append({
+                    "id": p.get('codigo_produto'),
+                    "code": code,
+                    "description": desc,
+                    "unit": p.get('unidade'),
+                    "unitPrice": float(p.get('valor_unitario') or 0)
+                })
+                if len(produtos) >= cap_results:
+                    break
+            if len(produtos) >= cap_results:
+                break
+            total_pages = data.get('total_de_paginas', 1) or 1
+            if page >= total_pages:
+                break
+            page += 1
         return jsonify({
             "items": produtos,
-            "page": data.get('pagina', page),
-            "totalPages": data.get('total_de_paginas', 1)
+            "totalFound": len(produtos)
         })
     except OmieError as e:
         return jsonify({"error": str(e)}), e.status
