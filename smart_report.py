@@ -6,6 +6,8 @@ import re
 import secrets
 import string
 from datetime import datetime
+from urllib import request as urlreq
+from urllib.error import HTTPError, URLError
 import bcrypt
 
 app = Flask(__name__)
@@ -451,6 +453,387 @@ def change_role(username):
     return jsonify({"success": True})
 
 
+# ==========================================================
+#  INTEGRAÇÃO OMIE
+# ==========================================================
+OMIE_BASE = "https://app.omie.com.br/api/v1"
+
+
+class OmieError(Exception):
+    def __init__(self, message, status=502, payload=None):
+        super().__init__(message)
+        self.status = status
+        self.payload = payload
+
+
+def omie_call(endpoint: str, call: str, param: dict, timeout: int = 20):
+    """Chama a API Omie. endpoint ex: '/geral/clientes/'. param é um dict (vai virar lista de 1 elemento)."""
+    app_key = os.environ.get("OMIE_APP_KEY")
+    app_secret = os.environ.get("OMIE_APP_SECRET")
+    if not app_key or not app_secret:
+        raise OmieError("Credenciais Omie não configuradas no servidor (OMIE_APP_KEY / OMIE_APP_SECRET).", status=503)
+
+    url = OMIE_BASE + endpoint
+    body = json.dumps({
+        "call": call,
+        "app_key": app_key,
+        "app_secret": app_secret,
+        "param": [param]
+    }).encode('utf-8')
+
+    req = urlreq.Request(url, data=body, headers={'Content-Type': 'application/json'})
+    try:
+        with urlreq.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode('utf-8')
+    except HTTPError as e:
+        # Omie devolve erros como HTTP 500 com JSON descritivo
+        try:
+            err_body = e.read().decode('utf-8')
+            err_json = json.loads(err_body)
+            msg = err_json.get('faultstring') or err_json.get('faultcode') or err_body
+        except Exception:
+            msg = f"HTTP {e.code}"
+        raise OmieError(f"Omie: {msg}", status=502, payload={"http": e.code})
+    except URLError as e:
+        raise OmieError(f"Falha de conexão com Omie: {e.reason}", status=502)
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        raise OmieError("Resposta inválida do Omie", status=502)
+
+
+def _require_user():
+    user = request.headers.get('Authorization')
+    full_data = load_data()
+    if not user or user not in full_data['users']:
+        return None, None, (jsonify({"error": "Não autorizado"}), 401)
+    if full_data['users'][user].get('status') != 'active':
+        return None, None, (jsonify({"error": "Conta inativa"}), 403)
+    return user, full_data, None
+
+
+@app.route('/api/omie/status', methods=['GET'])
+def omie_status():
+    """Verifica se as credenciais estão configuradas e se conseguimos chamar o Omie."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    has_key = bool(os.environ.get("OMIE_APP_KEY"))
+    has_secret = bool(os.environ.get("OMIE_APP_SECRET"))
+    if not has_key or not has_secret:
+        return jsonify({"configured": False, "ok": False, "message": "Credenciais Omie não configuradas no servidor."})
+    # Faz um ping de baixo custo: lista 1 cliente
+    try:
+        omie_call('/geral/clientes/', 'ListarClientes', {
+            "pagina": 1,
+            "registros_por_pagina": 1,
+            "apenas_importado_api": "N"
+        })
+        return jsonify({"configured": True, "ok": True})
+    except OmieError as e:
+        return jsonify({"configured": True, "ok": False, "message": str(e)}), e.status
+
+
+@app.route('/api/omie/clientes', methods=['GET'])
+def omie_clientes():
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    q = (request.args.get('q') or '').strip()
+    page = int(request.args.get('page', 1))
+    try:
+        param = {
+            "pagina": page,
+            "registros_por_pagina": 20,
+            "apenas_importado_api": "N"
+        }
+        if q:
+            # Omie aceita filtros via 'clientesFiltro'
+            param["clientesFiltro"] = {"razao_social": q}
+        data = omie_call('/geral/clientes/', 'ListarClientes', param)
+        clientes = []
+        for c in data.get('clientes_cadastro', []):
+            clientes.append({
+                "id": c.get('codigo_cliente_omie'),
+                "code": c.get('codigo_cliente_integracao'),
+                "name": c.get('razao_social') or c.get('nome_fantasia'),
+                "fantasia": c.get('nome_fantasia'),
+                "document": c.get('cnpj_cpf'),
+                "email": c.get('email'),
+                "phone": c.get('telefone1_numero')
+            })
+        return jsonify({
+            "items": clientes,
+            "page": data.get('pagina', page),
+            "totalPages": data.get('total_de_paginas', 1),
+            "totalRegisters": data.get('total_de_registros', len(clientes))
+        })
+    except OmieError as e:
+        return jsonify({"error": str(e)}), e.status
+
+
+@app.route('/api/omie/clientes', methods=['POST'])
+def omie_criar_cliente():
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    body = request.json or {}
+    try:
+        param = {
+            "codigo_cliente_integracao": body.get('code') or f"BIO-{int(datetime.utcnow().timestamp())}",
+            "razao_social": body.get('name') or '',
+            "nome_fantasia": body.get('fantasia') or body.get('name') or '',
+            "cnpj_cpf": body.get('document') or '',
+            "email": body.get('email') or '',
+            "telefone1_numero": body.get('phone') or ''
+        }
+        if not param["razao_social"]:
+            return jsonify({"error": "Nome/Razão social é obrigatório"}), 400
+        result = omie_call('/geral/clientes/', 'IncluirCliente', param)
+        return jsonify({
+            "success": True,
+            "id": result.get('codigo_cliente_omie'),
+            "code": result.get('codigo_cliente_integracao')
+        })
+    except OmieError as e:
+        return jsonify({"error": str(e)}), e.status
+
+
+@app.route('/api/omie/servicos', methods=['GET'])
+def omie_servicos():
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    q = (request.args.get('q') or '').strip()
+    page = int(request.args.get('page', 1))
+    try:
+        param = {
+            "pagina": page,
+            "registros_por_pagina": 20,
+            "filtrar_apenas_omiepdv": "N"
+        }
+        data = omie_call('/servicos/servico/', 'ListarCadastroServico', param)
+        servicos = []
+        for s in data.get('cadastros', []):
+            intern = s.get('intItem', {}) or {}
+            cab = s.get('cabecalho', {}) or {}
+            desc = cab.get('descricao') or intern.get('descricao_servico') or ''
+            if q and q.lower() not in (desc or '').lower() and q.lower() not in (cab.get('codigo') or '').lower():
+                continue
+            servicos.append({
+                "id": intern.get('nCodServ'),
+                "code": cab.get('codigo'),
+                "description": desc,
+                "unitPrice": float(cab.get('valor_unitario') or 0)
+            })
+        return jsonify({
+            "items": servicos,
+            "page": data.get('pagina', page),
+            "totalPages": data.get('total_de_paginas', 1)
+        })
+    except OmieError as e:
+        return jsonify({"error": str(e)}), e.status
+
+
+@app.route('/api/omie/produtos', methods=['GET'])
+def omie_produtos():
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    q = (request.args.get('q') or '').strip()
+    page = int(request.args.get('page', 1))
+    try:
+        param = {
+            "pagina": page,
+            "registros_por_pagina": 20,
+            "apenas_importado_api": "N",
+            "filtrar_apenas_omiepdv": "N"
+        }
+        if q:
+            param["filtrar_por_descricao"] = q
+        data = omie_call('/geral/produtos/', 'ListarProdutos', param)
+        produtos = []
+        for p in data.get('produto_servico_cadastro', []):
+            produtos.append({
+                "id": p.get('codigo_produto'),
+                "code": p.get('codigo'),
+                "description": p.get('descricao'),
+                "unit": p.get('unidade'),
+                "unitPrice": float(p.get('valor_unitario') or 0)
+            })
+        return jsonify({
+            "items": produtos,
+            "page": data.get('pagina', page),
+            "totalPages": data.get('total_de_paginas', 1)
+        })
+    except OmieError as e:
+        return jsonify({"error": str(e)}), e.status
+
+
+# ==========================================================
+#  ORDEM DE SERVIÇO - rascunhos locais + envio pro Omie
+# ==========================================================
+def _user_drafts(full_data, user):
+    """Garante que o userState tem osDrafts e retorna a lista."""
+    if user not in full_data['userStates']:
+        full_data['userStates'][user] = {}
+    if 'osDrafts' not in full_data['userStates'][user]:
+        full_data['userStates'][user]['osDrafts'] = []
+    return full_data['userStates'][user]['osDrafts']
+
+
+@app.route('/api/os', methods=['GET'])
+def os_list():
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    drafts = _user_drafts(full_data, user)
+    return jsonify(drafts)
+
+
+@app.route('/api/os', methods=['POST'])
+def os_create():
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    body = request.json or {}
+    now = datetime.utcnow().isoformat() + "Z"
+    draft = {
+        "id": "os_" + str(int(datetime.utcnow().timestamp() * 1000)) + "_" + secrets.token_hex(3),
+        "createdAt": now,
+        "updatedAt": now,
+        "createdBy": user,
+        "fromLaudo": body.get('fromLaudo') or None,
+        "client": body.get('client') or {"omieClientId": None, "name": "", "document": "", "email": "", "phone": ""},
+        "services": body.get('services') or [],
+        "parts": body.get('parts') or [],
+        "observations": body.get('observations') or '',
+        "status": "draft",
+        "omieOsId": None,
+        "omieOsNumber": None,
+        "sentAt": None,
+        "sendError": None
+    }
+    drafts = _user_drafts(full_data, user)
+    drafts.append(draft)
+    save_data(full_data)
+    return jsonify(draft)
+
+
+@app.route('/api/os/<os_id>', methods=['PUT'])
+def os_update(os_id):
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    body = request.json or {}
+    drafts = _user_drafts(full_data, user)
+    for i, d in enumerate(drafts):
+        if d['id'] == os_id:
+            if d['status'] == 'sent':
+                return jsonify({"error": "OS já enviada não pode ser editada"}), 400
+            for k in ('client', 'services', 'parts', 'observations', 'fromLaudo'):
+                if k in body:
+                    d[k] = body[k]
+            d['updatedAt'] = datetime.utcnow().isoformat() + "Z"
+            drafts[i] = d
+            save_data(full_data)
+            return jsonify(d)
+    return jsonify({"error": "Rascunho não encontrado"}), 404
+
+
+@app.route('/api/os/<os_id>', methods=['DELETE'])
+def os_delete(os_id):
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    drafts = _user_drafts(full_data, user)
+    full_data['userStates'][user]['osDrafts'] = [d for d in drafts if d['id'] != os_id]
+    save_data(full_data)
+    return jsonify({"success": True})
+
+
+@app.route('/api/os/<os_id>/send', methods=['POST'])
+def os_send(os_id):
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    drafts = _user_drafts(full_data, user)
+    draft = next((d for d in drafts if d['id'] == os_id), None)
+    if not draft:
+        return jsonify({"error": "Rascunho não encontrado"}), 404
+    if draft['status'] == 'sent':
+        return jsonify({"error": "OS já foi enviada anteriormente"}), 400
+
+    cli = draft.get('client') or {}
+    if not cli.get('omieClientId'):
+        return jsonify({"error": "Selecione (ou cadastre) o cliente no Omie antes de enviar."}), 400
+
+    # Monta payload da OS para Omie
+    itens = []
+    for s in draft.get('services', []):
+        if not s.get('omieServiceId'):
+            return jsonify({"error": f"Serviço '{s.get('description','')}' não está vinculado ao catálogo Omie."}), 400
+        qty = float(s.get('quantity') or 1)
+        price = float(s.get('unitPrice') or 0)
+        itens.append({
+            "ide": {"codigo_servico_integracao": f"srv_{s.get('omieServiceId')}_{int(datetime.utcnow().timestamp())}"},
+            "servico_prestado": {
+                "codigo_servico": s.get('omieServiceId'),
+                "descricao_servico": s.get('description') or '',
+                "quantidade": qty,
+                "valor_unitario": price
+            }
+        })
+
+    detalhes_produto = []
+    for p in draft.get('parts', []):
+        if not p.get('omieProductId'):
+            return jsonify({"error": f"Peça '{p.get('description','')}' não está vinculada ao catálogo Omie."}), 400
+        detalhes_produto.append({
+            "codigo_produto": p.get('omieProductId'),
+            "descricao": p.get('description') or '',
+            "quantidade": float(p.get('quantity') or 1),
+            "valor_unitario": float(p.get('unitPrice') or 0)
+        })
+
+    param = {
+        "Cabecalho": {
+            "nCodCli": cli['omieClientId'],
+            "cCodIntOS": draft['id'],
+            "dDtPrevisao": datetime.utcnow().strftime("%d/%m/%Y"),
+            "cEtapa": "10"
+        },
+        "InformacoesAdicionais": {
+            "cDadosAdicionais": draft.get('observations') or ''
+        },
+        "ServicosPrestados": itens
+    }
+    if detalhes_produto:
+        param["Departamentos"] = []  # placeholder caso Omie peça
+        # Produtos consumidos em OS dependem da config Omie; muitas vezes vão num Pedido de Venda à parte.
+        # Por enquanto incluímos nas observações como referência.
+        obs_extra = "\n\nPeças utilizadas:\n" + "\n".join(
+            f"- {p['description']} (qtd {p['quantity']} x R$ {p['unitPrice']:.2f})"
+            for p in draft.get('parts', [])
+        )
+        param["InformacoesAdicionais"]["cDadosAdicionais"] = (param["InformacoesAdicionais"]["cDadosAdicionais"] + obs_extra).strip()
+
+    try:
+        result = omie_call('/servicos/os/', 'IncluirOS', param)
+        draft['status'] = 'sent'
+        draft['omieOsId'] = result.get('nCodOS')
+        draft['omieOsNumber'] = result.get('cNumOS')
+        draft['sentAt'] = datetime.utcnow().isoformat() + "Z"
+        draft['sendError'] = None
+        save_data(full_data)
+        return jsonify(draft)
+    except OmieError as e:
+        draft['sendError'] = str(e)
+        save_data(full_data)
+        return jsonify({"error": str(e)}), e.status
+
+
 HTML_PAGE = """
 <!DOCTYPE html>
 <html lang="pt-BR">
@@ -536,6 +919,19 @@ HTML_PAGE = """
             // Estados do Admin
             const [editingModelId, setEditingModelId] = useState(null);
             const [usersList, setUsersList] = useState([]);
+
+            // Estados de Ordens de Serviço (Omie)
+            const [osDrafts, setOsDrafts] = useState([]);
+            const [currentOs, setCurrentOs] = useState(null);
+            const [omieStatus, setOmieStatus] = useState({ checked: false, ok: false, configured: false, message: '' });
+            const [clienteSearch, setClienteSearch] = useState('');
+            const [clienteResults, setClienteResults] = useState([]);
+            const [showNewClienteModal, setShowNewClienteModal] = useState(false);
+            const [servicoSearch, setServicoSearch] = useState({ q: '', forIndex: null });
+            const [servicoResults, setServicoResults] = useState([]);
+            const [produtoSearch, setProdutoSearch] = useState({ q: '', forIndex: null });
+            const [produtoResults, setProdutoResults] = useState([]);
+            const [osSendError, setOsSendError] = useState('');
 
             useEffect(() => {
                 const storedPending = localStorage.getItem('smartReportPendingImages');
@@ -630,6 +1026,136 @@ HTML_PAGE = """
                     fetchUsers();
                 }
             }, [activeTab, auth]);
+
+            // Carrega rascunhos de OS + status Omie quando entra na aba "os"
+            const fetchOsDrafts = () => {
+                fetch('/api/os', { headers: { 'Authorization': auth.token } })
+                    .then(r => r.json()).then(d => { if(Array.isArray(d)) setOsDrafts(d); });
+            };
+            const checkOmieStatus = () => {
+                fetch('/api/omie/status', { headers: { 'Authorization': auth.token } })
+                    .then(r => r.json()).then(d => setOmieStatus({ checked: true, ok: !!d.ok, configured: !!d.configured, message: d.message || '' }))
+                    .catch(() => setOmieStatus({ checked: true, ok: false, configured: false, message: 'Erro de conexão' }));
+            };
+            useEffect(() => {
+                if (auth && activeTab === 'os') {
+                    fetchOsDrafts();
+                    checkOmieStatus();
+                }
+            }, [activeTab, auth]);
+
+            // ---- helpers OS ----
+            const createNewOs = (prefill = {}) => {
+                fetch('/api/os', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                    body: JSON.stringify(prefill)
+                }).then(r => r.json()).then(d => {
+                    if (d && d.id) {
+                        setCurrentOs(d);
+                        fetchOsDrafts();
+                        setActiveTab('os');
+                    }
+                });
+            };
+
+            const saveCurrentOs = (silent = false) => {
+                if (!currentOs) return Promise.resolve();
+                return fetch(`/api/os/${currentOs.id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                    body: JSON.stringify({
+                        client: currentOs.client,
+                        services: currentOs.services,
+                        parts: currentOs.parts,
+                        observations: currentOs.observations,
+                        fromLaudo: currentOs.fromLaudo
+                    })
+                }).then(r => r.json()).then(d => {
+                    if (d && d.id) {
+                        setCurrentOs(d);
+                        fetchOsDrafts();
+                        if (!silent) alert('Rascunho salvo!');
+                    } else if (d.error) {
+                        alert(d.error);
+                    }
+                });
+            };
+
+            const deleteOs = (id) => {
+                if (!confirm('Excluir este rascunho de OS?')) return;
+                fetch(`/api/os/${id}`, { method: 'DELETE', headers: { 'Authorization': auth.token } })
+                    .then(() => {
+                        if (currentOs && currentOs.id === id) setCurrentOs(null);
+                        fetchOsDrafts();
+                    });
+            };
+
+            const sendOsToOmie = () => {
+                if (!currentOs) return;
+                setOsSendError('');
+                saveCurrentOs(true).then(() => {
+                    fetch(`/api/os/${currentOs.id}/send`, {
+                        method: 'POST',
+                        headers: { 'Authorization': auth.token }
+                    }).then(r => r.json().then(data => ({status: r.status, data}))).then(({status, data}) => {
+                        if (data.id && data.status === 'sent') {
+                            setCurrentOs(data);
+                            fetchOsDrafts();
+                            alert(`OS enviada para o Omie! Número: ${data.omieOsNumber || data.omieOsId}`);
+                        } else {
+                            setOsSendError(data.error || 'Erro ao enviar');
+                        }
+                    });
+                });
+            };
+
+            const generateOsFromCurrentLaudo = () => {
+                const clientField = headerConfig.find(f => f.id === 'client');
+                const defectField = headerConfig.find(f => f.id === 'defect');
+                const clientName = clientField ? (headerData[clientField.id] || '') : '';
+                const defect = defectField ? (headerData[defectField.id] || '') : '';
+                const selectedModel = models.find(m => m.id === headerData.selectedTemplateId);
+                const modelName = selectedModel ? selectedModel.name : '';
+                const obs = [
+                    modelName && `Modelo: ${modelName}`,
+                    defect && `Defeito alegado pelo cliente: ${defect}`
+                ].filter(Boolean).join('\n\n');
+                createNewOs({
+                    fromLaudo: { client: clientName, model: modelName, defect, generatedAt: new Date().toISOString() },
+                    client: { omieClientId: null, name: clientName, document: '', email: '', phone: '' },
+                    observations: obs
+                });
+            };
+
+            // ---- helpers Omie search ----
+            const searchClientes = (q) => {
+                fetch(`/api/omie/clientes?q=${encodeURIComponent(q || '')}`, { headers: { 'Authorization': auth.token } })
+                    .then(r => r.json()).then(d => setClienteResults(d.items || []));
+            };
+            const searchServicos = (q) => {
+                fetch(`/api/omie/servicos?q=${encodeURIComponent(q || '')}`, { headers: { 'Authorization': auth.token } })
+                    .then(r => r.json()).then(d => setServicoResults(d.items || []));
+            };
+            const searchProdutos = (q) => {
+                fetch(`/api/omie/produtos?q=${encodeURIComponent(q || '')}`, { headers: { 'Authorization': auth.token } })
+                    .then(r => r.json()).then(d => setProdutoResults(d.items || []));
+            };
+
+            const createOmieCliente = (data) => {
+                return fetch('/api/omie/clientes', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                    body: JSON.stringify(data)
+                }).then(r => r.json());
+            };
+
+            const osTotal = (os) => {
+                if (!os) return 0;
+                const sumS = (os.services || []).reduce((a, s) => a + (parseFloat(s.quantity || 0) * parseFloat(s.unitPrice || 0)), 0);
+                const sumP = (os.parts || []).reduce((a, p) => a + (parseFloat(p.quantity || 0) * parseFloat(p.unitPrice || 0)), 0);
+                return sumS + sumP;
+            };
 
             const handleLogin = (e) => {
                 e.preventDefault();
@@ -1212,6 +1738,15 @@ HTML_PAGE = """
                             <input type="file" accept="image/*" multiple ref=${galleryInputRef} onChange=${handleFileSelect} className="hidden" />
                         </div>
 
+                        {/* GERAR OS A PARTIR DESTE LAUDO */}
+                        <div className="bg-gradient-to-r from-indigo-50 to-blue-50 border-2 border-indigo-200 p-5 rounded-xl flex flex-col md:flex-row items-start md:items-center gap-4">
+                            <div className="flex-1">
+                                <h3 className="font-bold text-indigo-900 flex items-center gap-2"><i className="ph-fill ph-clipboard-text text-indigo-600 text-xl"></i> Gerar Ordem de Serviço</h3>
+                                <p className="text-sm text-indigo-700 mt-1">Crie uma OS pré-preenchida com base nos dados deste laudo. Você poderá adicionar serviços e peças, e enviar pro Omie.</p>
+                            </div>
+                            <button onClick=${generateOsFromCurrentLaudo} className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2.5 rounded-lg font-bold flex items-center gap-2 shadow-md whitespace-nowrap"><i className="ph-bold ph-arrow-right"></i> Gerar OS deste Laudo</button>
+                        </div>
+
                         {/* ASSINATURA DO TÉCNICO */}
                         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                             <h2 className="text-xl font-semibold mb-4 text-slate-800 flex items-center gap-2">
@@ -1550,6 +2085,247 @@ HTML_PAGE = """
                 `;
             };
 
+            const renderOS = () => {
+                // Tela de edição de uma OS específica
+                if (currentOs) {
+                    const updateOs = (patch) => setCurrentOs(prev => ({ ...prev, ...patch }));
+                    const updateService = (i, patch) => updateOs({ services: currentOs.services.map((s, idx) => idx === i ? { ...s, ...patch } : s) });
+                    const updatePart = (i, patch) => updateOs({ parts: currentOs.parts.map((p, idx) => idx === i ? { ...p, ...patch } : p) });
+                    const addService = () => updateOs({ services: [...(currentOs.services || []), { omieServiceId: null, code: '', description: '', quantity: 1, unitPrice: 0 }] });
+                    const removeService = (i) => updateOs({ services: currentOs.services.filter((_, idx) => idx !== i) });
+                    const addPart = () => updateOs({ parts: [...(currentOs.parts || []), { omieProductId: null, code: '', description: '', quantity: 1, unitPrice: 0 }] });
+                    const removePart = (i) => updateOs({ parts: currentOs.parts.filter((_, idx) => idx !== i) });
+                    const isLocked = currentOs.status === 'sent';
+
+                    return html`
+                        <div className="space-y-6 animate-in fade-in duration-300">
+                            <div className="bg-white p-4 rounded-xl border border-slate-200 flex flex-col md:flex-row md:items-center gap-3 justify-between">
+                                <div>
+                                    <button onClick=${() => setCurrentOs(null)} className="text-sm text-slate-500 hover:text-slate-700"><i className="ph-bold ph-arrow-left"></i> Voltar para lista</button>
+                                    <h2 className="text-xl font-bold text-slate-800 mt-1 flex items-center gap-2">
+                                        <i className="ph-fill ph-clipboard-text text-indigo-600 text-2xl"></i>
+                                        ${isLocked ? `OS #${currentOs.omieOsNumber || currentOs.omieOsId} (enviada)` : 'Editar Rascunho de OS'}
+                                    </h2>
+                                </div>
+                                <div className="flex gap-2 flex-wrap">
+                                    ${!isLocked && html`
+                                        <button onClick=${() => saveCurrentOs(false)} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded font-medium flex items-center gap-1"><i className="ph-bold ph-floppy-disk"></i> Salvar</button>
+                                        <button onClick=${sendOsToOmie} disabled=${!omieStatus.ok} className=${`px-4 py-2 rounded font-medium flex items-center gap-1 text-white ${omieStatus.ok ? 'bg-green-600 hover:bg-green-700' : 'bg-slate-400 cursor-not-allowed'}`}><i className="ph-bold ph-paper-plane-tilt"></i> Enviar pro Omie</button>
+                                    `}
+                                </div>
+                            </div>
+
+                            ${osSendError && html`<div className="bg-red-50 border border-red-200 text-red-700 p-3 rounded">${osSendError}</div>`}
+
+                            ${currentOs.fromLaudo && html`
+                                <div className="bg-blue-50 border border-blue-200 p-3 rounded-lg text-sm text-blue-800 flex items-center gap-2">
+                                    <i className="ph-fill ph-link"></i>
+                                    <span>Esta OS foi gerada a partir do laudo de <b>${currentOs.fromLaudo.client || 'cliente'}</b> ${currentOs.fromLaudo.model ? `— ${currentOs.fromLaudo.model}` : ''}</span>
+                                </div>
+                            `}
+
+                            {/* CLIENTE */}
+                            <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                                <h3 className="text-lg font-semibold mb-3 text-slate-800 flex items-center gap-2"><i className="ph-fill ph-user text-blue-600 text-xl"></i> Cliente</h3>
+                                ${currentOs.client && currentOs.client.omieClientId ? html`
+                                    <div className="bg-green-50 border border-green-200 p-3 rounded flex justify-between items-center">
+                                        <div>
+                                            <div className="font-bold text-slate-800">${currentOs.client.name}</div>
+                                            <div className="text-xs text-slate-500">Omie ID: ${currentOs.client.omieClientId} ${currentOs.client.document && `| ${currentOs.client.document}`}</div>
+                                        </div>
+                                        ${!isLocked && html`<button onClick=${() => updateOs({ client: { omieClientId: null, name: currentOs.client.name || '', document: '', email: '', phone: '' } })} className="text-xs bg-white hover:bg-slate-100 border border-slate-300 px-2 py-1 rounded">Trocar</button>`}
+                                    </div>
+                                ` : html`
+                                    <div className="space-y-3">
+                                        <div className="flex gap-2">
+                                            <input type="text" placeholder="Buscar cliente no Omie por nome/razão social..." value=${clienteSearch} onChange=${(e) => setClienteSearch(e.target.value)} className="flex-1 p-2 border border-slate-300 rounded outline-none focus:ring-2 focus:ring-blue-500" />
+                                            <button onClick=${() => searchClientes(clienteSearch)} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded font-medium"><i className="ph-bold ph-magnifying-glass"></i></button>
+                                            <button onClick=${() => setShowNewClienteModal(true)} className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded font-medium" title="Cadastrar novo cliente no Omie"><i className="ph-bold ph-plus"></i></button>
+                                        </div>
+                                        ${clienteResults.length > 0 && html`
+                                            <div className="border border-slate-200 rounded divide-y divide-slate-100 max-h-60 overflow-y-auto">
+                                                ${clienteResults.map(c => html`
+                                                    <button key=${c.id} onClick=${() => { updateOs({ client: { omieClientId: c.id, name: c.name, document: c.document, email: c.email, phone: c.phone } }); setClienteResults([]); setClienteSearch(''); }} className="w-full text-left p-3 hover:bg-blue-50 transition">
+                                                        <div className="font-medium">${c.name}</div>
+                                                        <div className="text-xs text-slate-500">${c.document || ''} ${c.email ? '| ' + c.email : ''}</div>
+                                                    </button>
+                                                `)}
+                                            </div>
+                                        `}
+                                        ${currentOs.client && currentOs.client.name && !currentOs.client.omieClientId && html`
+                                            <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 p-2 rounded"><i className="ph-fill ph-warning"></i> Cliente "<b>${currentOs.client.name}</b>" não está cadastrado no Omie. Busque acima ou clique no <b>+</b> pra cadastrar.</div>
+                                        `}
+                                    </div>
+                                `}
+                            </div>
+
+                            {/* SERVIÇOS */}
+                            <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                                <div className="flex justify-between items-center mb-3">
+                                    <h3 className="text-lg font-semibold text-slate-800 flex items-center gap-2"><i className="ph-fill ph-wrench text-blue-600 text-xl"></i> Serviços</h3>
+                                    ${!isLocked && html`<button onClick=${addService} className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-3 py-1.5 rounded text-sm font-medium border border-blue-200"><i className="ph-bold ph-plus"></i> Adicionar Serviço</button>`}
+                                </div>
+                                ${(currentOs.services || []).length === 0 ? html`
+                                    <div className="text-center text-sm text-slate-400 py-4">Nenhum serviço adicionado.</div>
+                                ` : html`
+                                    <div className="space-y-2">
+                                        ${currentOs.services.map((s, i) => html`
+                                            <div key=${i} className="bg-slate-50 border border-slate-200 rounded p-3">
+                                                <div className="flex gap-2 items-start">
+                                                    <div className="flex-1 space-y-2">
+                                                        <div className="flex gap-2">
+                                                            <input type="text" placeholder="Buscar serviço no Omie..." value=${servicoSearch.forIndex === i ? servicoSearch.q : (s.description || '')} onChange=${(e) => setServicoSearch({ q: e.target.value, forIndex: i })} className="flex-1 p-2 border border-slate-300 rounded text-sm" disabled=${isLocked} />
+                                                            ${!isLocked && html`<button onClick=${() => searchServicos(servicoSearch.forIndex === i ? servicoSearch.q : (s.description || ''))} className="bg-blue-600 text-white px-3 rounded text-sm"><i className="ph-bold ph-magnifying-glass"></i></button>`}
+                                                        </div>
+                                                        ${servicoSearch.forIndex === i && servicoResults.length > 0 && html`
+                                                            <div className="border border-slate-200 rounded divide-y divide-slate-100 max-h-40 overflow-y-auto bg-white">
+                                                                ${servicoResults.map(sr => html`
+                                                                    <button key=${sr.id} onClick=${() => { updateService(i, { omieServiceId: sr.id, code: sr.code, description: sr.description, unitPrice: sr.unitPrice || s.unitPrice }); setServicoSearch({ q: '', forIndex: null }); setServicoResults([]); }} className="w-full text-left p-2 text-sm hover:bg-blue-50">
+                                                                        <div className="font-medium">${sr.code} — ${sr.description}</div>
+                                                                        <div className="text-xs text-slate-500">R$ ${(sr.unitPrice || 0).toFixed(2)}</div>
+                                                                    </button>
+                                                                `)}
+                                                            </div>
+                                                        `}
+                                                        ${s.omieServiceId ? html`<div className="text-xs text-green-700"><i className="ph-fill ph-check-circle"></i> Vinculado: ${s.code} — ${s.description}</div>` : html`<div className="text-xs text-amber-700"><i className="ph ph-warning"></i> Não vinculado ao Omie</div>`}
+                                                        <div className="flex gap-2 items-center">
+                                                            <label className="text-xs text-slate-600">Qtd</label>
+                                                            <input type="number" min="0" step="0.01" value=${s.quantity} onChange=${e => updateService(i, { quantity: e.target.value })} className="w-20 p-1.5 border border-slate-300 rounded text-sm" disabled=${isLocked} />
+                                                            <label className="text-xs text-slate-600 ml-2">R$ unit.</label>
+                                                            <input type="number" min="0" step="0.01" value=${s.unitPrice} onChange=${e => updateService(i, { unitPrice: e.target.value })} className="w-24 p-1.5 border border-slate-300 rounded text-sm" disabled=${isLocked} />
+                                                            <div className="ml-auto text-sm font-bold text-slate-700">= R$ ${((parseFloat(s.quantity)||0) * (parseFloat(s.unitPrice)||0)).toFixed(2)}</div>
+                                                        </div>
+                                                    </div>
+                                                    ${!isLocked && html`<button onClick=${() => removeService(i)} className="text-red-500 hover:bg-red-50 p-2 rounded"><i className="ph-bold ph-trash"></i></button>`}
+                                                </div>
+                                            </div>
+                                        `)}
+                                    </div>
+                                `}
+                            </div>
+
+                            {/* PEÇAS */}
+                            <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                                <div className="flex justify-between items-center mb-3">
+                                    <h3 className="text-lg font-semibold text-slate-800 flex items-center gap-2"><i className="ph-fill ph-package text-blue-600 text-xl"></i> Peças</h3>
+                                    ${!isLocked && html`<button onClick=${addPart} className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-3 py-1.5 rounded text-sm font-medium border border-blue-200"><i className="ph-bold ph-plus"></i> Adicionar Peça</button>`}
+                                </div>
+                                ${(currentOs.parts || []).length === 0 ? html`
+                                    <div className="text-center text-sm text-slate-400 py-4">Nenhuma peça adicionada.</div>
+                                ` : html`
+                                    <div className="space-y-2">
+                                        ${currentOs.parts.map((p, i) => html`
+                                            <div key=${i} className="bg-slate-50 border border-slate-200 rounded p-3">
+                                                <div className="flex gap-2 items-start">
+                                                    <div className="flex-1 space-y-2">
+                                                        <div className="flex gap-2">
+                                                            <input type="text" placeholder="Buscar peça no Omie..." value=${produtoSearch.forIndex === i ? produtoSearch.q : (p.description || '')} onChange=${(e) => setProdutoSearch({ q: e.target.value, forIndex: i })} className="flex-1 p-2 border border-slate-300 rounded text-sm" disabled=${isLocked} />
+                                                            ${!isLocked && html`<button onClick=${() => searchProdutos(produtoSearch.forIndex === i ? produtoSearch.q : (p.description || ''))} className="bg-blue-600 text-white px-3 rounded text-sm"><i className="ph-bold ph-magnifying-glass"></i></button>`}
+                                                        </div>
+                                                        ${produtoSearch.forIndex === i && produtoResults.length > 0 && html`
+                                                            <div className="border border-slate-200 rounded divide-y divide-slate-100 max-h-40 overflow-y-auto bg-white">
+                                                                ${produtoResults.map(pr => html`
+                                                                    <button key=${pr.id} onClick=${() => { updatePart(i, { omieProductId: pr.id, code: pr.code, description: pr.description, unitPrice: pr.unitPrice || p.unitPrice }); setProdutoSearch({ q: '', forIndex: null }); setProdutoResults([]); }} className="w-full text-left p-2 text-sm hover:bg-blue-50">
+                                                                        <div className="font-medium">${pr.code} — ${pr.description}</div>
+                                                                        <div className="text-xs text-slate-500">${pr.unit || ''} | R$ ${(pr.unitPrice || 0).toFixed(2)}</div>
+                                                                    </button>
+                                                                `)}
+                                                            </div>
+                                                        `}
+                                                        ${p.omieProductId ? html`<div className="text-xs text-green-700"><i className="ph-fill ph-check-circle"></i> Vinculado: ${p.code} — ${p.description}</div>` : html`<div className="text-xs text-amber-700"><i className="ph ph-warning"></i> Não vinculado ao Omie</div>`}
+                                                        <div className="flex gap-2 items-center">
+                                                            <label className="text-xs text-slate-600">Qtd</label>
+                                                            <input type="number" min="0" step="0.01" value=${p.quantity} onChange=${e => updatePart(i, { quantity: e.target.value })} className="w-20 p-1.5 border border-slate-300 rounded text-sm" disabled=${isLocked} />
+                                                            <label className="text-xs text-slate-600 ml-2">R$ unit.</label>
+                                                            <input type="number" min="0" step="0.01" value=${p.unitPrice} onChange=${e => updatePart(i, { unitPrice: e.target.value })} className="w-24 p-1.5 border border-slate-300 rounded text-sm" disabled=${isLocked} />
+                                                            <div className="ml-auto text-sm font-bold text-slate-700">= R$ ${((parseFloat(p.quantity)||0) * (parseFloat(p.unitPrice)||0)).toFixed(2)}</div>
+                                                        </div>
+                                                    </div>
+                                                    ${!isLocked && html`<button onClick=${() => removePart(i)} className="text-red-500 hover:bg-red-50 p-2 rounded"><i className="ph-bold ph-trash"></i></button>`}
+                                                </div>
+                                            </div>
+                                        `)}
+                                    </div>
+                                `}
+                            </div>
+
+                            {/* OBSERVAÇÕES + TOTAL */}
+                            <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                                <h3 className="text-lg font-semibold mb-3 text-slate-800 flex items-center gap-2"><i className="ph-fill ph-note text-blue-600 text-xl"></i> Observações</h3>
+                                <textarea value=${currentOs.observations || ''} onChange=${(e) => updateOs({ observations: e.target.value })} rows="4" disabled=${isLocked} className="w-full p-3 border border-slate-300 rounded outline-none focus:ring-2 focus:ring-blue-500"></textarea>
+                                <div className="mt-4 text-right">
+                                    <div className="inline-block bg-slate-900 text-white px-6 py-3 rounded-lg">
+                                        <div className="text-xs text-slate-300 uppercase">Total da OS</div>
+                                        <div className="text-2xl font-bold">R$ ${osTotal(currentOs).toFixed(2)}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+
+                // Tela de LISTA de OSes
+                return html`
+                    <div className="space-y-6 animate-in fade-in duration-300">
+                        <div className=${`p-4 rounded-xl border flex items-center gap-3 ${omieStatus.ok ? 'bg-green-50 border-green-200' : 'bg-amber-50 border-amber-200'}`}>
+                            <i className=${`ph-fill ${omieStatus.ok ? 'ph-check-circle text-green-600' : 'ph-warning text-amber-600'} text-2xl`}></i>
+                            <div className="flex-1">
+                                <div className="font-bold ${omieStatus.ok ? 'text-green-800' : 'text-amber-800'}">${omieStatus.ok ? 'Conectado ao Omie' : (omieStatus.configured ? 'Erro de conexão Omie' : 'Omie não configurado')}</div>
+                                ${!omieStatus.ok && html`<div className="text-sm text-amber-700">${omieStatus.message || 'Cadastre OMIE_APP_KEY e OMIE_APP_SECRET nas variáveis de ambiente do servidor.'}</div>`}
+                            </div>
+                            <button onClick=${checkOmieStatus} className="text-sm bg-white border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50"><i className="ph-bold ph-arrows-clockwise"></i> Testar</button>
+                        </div>
+
+                        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                            <div className="flex justify-between items-center mb-4">
+                                <h2 className="text-xl font-semibold text-slate-800 flex items-center gap-2"><i className="ph-fill ph-clipboard-text text-indigo-600 text-2xl"></i> Minhas Ordens de Serviço</h2>
+                                <button onClick=${() => createNewOs()} className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded font-medium flex items-center gap-1"><i className="ph-bold ph-plus"></i> Nova OS</button>
+                            </div>
+                            ${osDrafts.length === 0 ? html`
+                                <div className="text-center py-10 text-slate-500">
+                                    <i className="ph ph-clipboard text-5xl"></i>
+                                    <p className="mt-2">Nenhuma OS criada ainda. Clique em "Nova OS" ou gere uma a partir de um laudo.</p>
+                                </div>
+                            ` : html`
+                                <div className="overflow-x-auto">
+                                    <table className="min-w-full text-sm">
+                                        <thead className="bg-slate-100 text-slate-700">
+                                            <tr>
+                                                <th className="p-3 text-left">Data</th>
+                                                <th className="p-3 text-left">Cliente</th>
+                                                <th className="p-3 text-center">Itens</th>
+                                                <th className="p-3 text-right">Total</th>
+                                                <th className="p-3 text-center">Status</th>
+                                                <th className="p-3 text-right">Ações</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100">
+                                            ${osDrafts.slice().reverse().map(o => html`
+                                                <tr key=${o.id} className="hover:bg-slate-50">
+                                                    <td className="p-3 text-xs">${new Date(o.createdAt).toLocaleString('pt-BR')}</td>
+                                                    <td className="p-3">${o.client?.name || '(sem cliente)'}</td>
+                                                    <td className="p-3 text-center text-xs">${(o.services||[]).length} serv. / ${(o.parts||[]).length} peças</td>
+                                                    <td className="p-3 text-right font-bold">R$ ${osTotal(o).toFixed(2)}</td>
+                                                    <td className="p-3 text-center">
+                                                        ${o.status === 'sent' ? html`<span className="bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs font-bold">ENVIADA #${o.omieOsNumber || o.omieOsId}</span>` :
+                                                          o.sendError ? html`<span className="bg-red-100 text-red-700 px-2 py-0.5 rounded text-xs font-bold" title=${o.sendError}>ERRO</span>` :
+                                                          html`<span className="bg-slate-200 text-slate-700 px-2 py-0.5 rounded text-xs font-bold">RASCUNHO</span>`}
+                                                    </td>
+                                                    <td className="p-3 text-right whitespace-nowrap">
+                                                        <button onClick=${() => setCurrentOs(o)} className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-2 py-1 rounded text-xs font-medium mr-1">${o.status === 'sent' ? 'Ver' : 'Editar'}</button>
+                                                        ${o.status !== 'sent' && html`<button onClick=${() => deleteOs(o.id)} className="bg-red-50 hover:bg-red-100 text-red-700 px-2 py-1 rounded text-xs font-medium"><i className="ph-bold ph-trash"></i></button>`}
+                                                    </td>
+                                                </tr>
+                                            `)}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            `}
+                        </div>
+                    </div>
+                `;
+            };
+
             const renderPrintView = () => {
                 const selectedModel = models.find(m => m.id === headerData.selectedTemplateId);
                 const printQuestions = selectedModel ? selectedModel.questions : [];
@@ -1664,6 +2440,7 @@ HTML_PAGE = """
 
                         <div className="flex space-x-1 mb-6 bg-slate-200 p-1 rounded-xl w-full md:w-fit overflow-x-auto scrollbar-hide">
                             <button onClick=${() => setActiveTab('report')} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'report' ? 'bg-white text-blue-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}><i className="ph-bold ph-file-text"></i> Preencher Laudo</button>
+                            <button onClick=${() => { setActiveTab('os'); setCurrentOs(null); }} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'os' ? 'bg-white text-indigo-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}><i className="ph-bold ph-clipboard-text"></i> Ordens de Serviço</button>
 
                             ${auth.role === 'admin' && html`
                                 <button onClick=${() => setActiveTab('settings')} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'settings' ? 'bg-white text-indigo-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}><i className="ph-bold ph-gear"></i> Templates (Global)</button>
@@ -1673,6 +2450,7 @@ HTML_PAGE = """
 
                         <main>
                             ${activeTab === 'report' ? renderReportForm() : ''}
+                            ${activeTab === 'os' ? renderOS() : ''}
                             ${activeTab === 'settings' && auth.role === 'admin' ? renderSettings() : ''}
                             ${activeTab === 'users' && auth.role === 'admin' ? renderUsers() : ''}
                         </main>
@@ -1692,6 +2470,40 @@ HTML_PAGE = """
                                     <button onClick=${() => galleryInputRef.current.click()} className="w-full flex items-center justify-center gap-3 bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 p-4 rounded-xl font-medium transition"><i className="ph-fill ph-image text-2xl"></i> Importar da Galeria</button>
                                     <button onClick=${() => setSourceModalOpen(false)} className="w-full mt-2 p-3 text-red-500 font-medium hover:bg-red-50 rounded-xl transition">Cancelar</button>
                                 </div>
+                            </div>
+                        </div>
+                    `}
+
+                    ${showNewClienteModal && html`
+                        <div className="print:hidden fixed inset-0 bg-slate-900/70 z-[80] flex items-center justify-center p-4">
+                            <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-6">
+                                <h3 className="text-lg font-bold text-slate-800 mb-3 flex items-center gap-2"><i className="ph-fill ph-user-plus text-green-600"></i> Novo cliente no Omie</h3>
+                                <form onSubmit=${(e) => {
+                                    e.preventDefault();
+                                    const f = e.target;
+                                    createOmieCliente({
+                                        name: f.name.value,
+                                        document: f.document.value,
+                                        email: f.email.value,
+                                        phone: f.phone.value
+                                    }).then(r => {
+                                        if (r.success) {
+                                            setCurrentOs(prev => ({ ...prev, client: { omieClientId: r.id, name: f.name.value, document: f.document.value, email: f.email.value, phone: f.phone.value } }));
+                                            setShowNewClienteModal(false);
+                                        } else {
+                                            alert(r.error || 'Erro ao cadastrar');
+                                        }
+                                    });
+                                }} className="space-y-3">
+                                    <input name="name" required defaultValue=${currentOs?.client?.name || ''} placeholder="Razão Social / Nome *" className="w-full p-2 border border-slate-300 rounded" />
+                                    <input name="document" placeholder="CPF/CNPJ" className="w-full p-2 border border-slate-300 rounded" />
+                                    <input name="email" type="email" placeholder="E-mail" className="w-full p-2 border border-slate-300 rounded" />
+                                    <input name="phone" placeholder="Telefone" className="w-full p-2 border border-slate-300 rounded" />
+                                    <div className="flex gap-2 mt-4">
+                                        <button type="button" onClick=${() => setShowNewClienteModal(false)} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 p-3 rounded font-medium">Cancelar</button>
+                                        <button type="submit" className="flex-1 bg-green-600 hover:bg-green-700 text-white p-3 rounded font-bold">Cadastrar no Omie</button>
+                                    </div>
+                                </form>
                             </div>
                         </div>
                     `}
