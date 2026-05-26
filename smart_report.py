@@ -1738,7 +1738,6 @@ HTML_PAGE = """
                             <input type="file" accept="image/*" multiple ref=${galleryInputRef} onChange=${handleFileSelect} className="hidden" />
                         </div>
 
-                        {/* GERAR OS A PARTIR DESTE LAUDO */}
                         <div className="bg-gradient-to-r from-indigo-50 to-blue-50 border-2 border-indigo-200 p-5 rounded-xl flex flex-col md:flex-row items-start md:items-center gap-4">
                             <div className="flex-1">
                                 <h3 className="font-bold text-indigo-900 flex items-center gap-2"><i className="ph-fill ph-clipboard-text text-indigo-600 text-xl"></i> Gerar Ordem de Serviço</h3>
@@ -1747,7 +1746,6 @@ HTML_PAGE = """
                             <button onClick=${generateOsFromCurrentLaudo} className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2.5 rounded-lg font-bold flex items-center gap-2 shadow-md whitespace-nowrap"><i className="ph-bold ph-arrow-right"></i> Gerar OS deste Laudo</button>
                         </div>
 
-                        {/* ASSINATURA DO TÉCNICO */}
                         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                             <h2 className="text-xl font-semibold mb-4 text-slate-800 flex items-center gap-2">
                                 <i className="ph-fill ph-signature text-blue-600 text-2xl"></i> Assinatura do Técnico
@@ -1756,7 +1754,6 @@ HTML_PAGE = """
                             <${SignaturePad} value=${headerData.technicianSignature || ''} onChange=${(dataUrl) => setHeaderData({...headerData, technicianSignature: dataUrl})} />
                         </div>
 
-                        {/* PREFERÊNCIAS INDIVIDUAIS DO USUÁRIO PARA O LAUDO */}
                         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                             <h2 className="text-xl font-semibold mb-4 text-slate-800 flex items-center gap-2">
                                 <i className="ph-fill ph-sliders text-indigo-600 text-2xl"></i> Opções do Relatório
@@ -2124,7 +2121,6 @@ HTML_PAGE = """
                                 </div>
                             `}
 
-                            {/* CLIENTE */}
                             <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                                 <h3 className="text-lg font-semibold mb-3 text-slate-800 flex items-center gap-2"><i className="ph-fill ph-user text-blue-600 text-xl"></i> Cliente</h3>
                                 ${currentOs.client && currentOs.client.omieClientId ? html`
@@ -2159,7 +2155,6 @@ HTML_PAGE = """
                                 `}
                             </div>
 
-                            {/* SERVIÇOS */}
                             <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                                 <div className="flex justify-between items-center mb-3">
                                     <h3 className="text-lg font-semibold text-slate-800 flex items-center gap-2"><i className="ph-fill ph-wrench text-blue-600 text-xl"></i> Serviços</h3>
@@ -2204,7 +2199,6 @@ HTML_PAGE = """
                                 `}
                             </div>
 
-                            {/* PEÇAS */}
                             <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                                 <div className="flex justify-between items-center mb-3">
                                     <h3 className="text-lg font-semibold text-slate-800 flex items-center gap-2"><i className="ph-fill ph-package text-blue-600 text-xl"></i> Peças</h3>
@@ -2249,7 +2243,6 @@ HTML_PAGE = """
                                 `}
                             </div>
 
-                            {/* OBSERVAÇÕES + TOTAL */}
                             <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                                 <h3 className="text-lg font-semibold mb-3 text-slate-800 flex items-center gap-2"><i className="ph-fill ph-note text-blue-600 text-xl"></i> Observações</h3>
                                 <textarea value=${currentOs.observations || ''} onChange=${(e) => updateOs({ observations: e.target.value })} rows="4" disabled=${isLocked} className="w-full p-3 border border-slate-300 rounded outline-none focus:ring-2 focus:ring-blue-500"></textarea>
@@ -2460,7 +2453,6 @@ HTML_PAGE = """
                         ${isSaving ? html`<span className="flex items-center gap-1"><i className="ph ph-spinner animate-spin"></i> Sincronizando...</span>` : html`<span className="flex items-center gap-1"><i className="ph-fill ph-check-circle text-green-400"></i> Salvo na Nuvem</span>`}
                     </div>
 
-                    {/* MODAIS (FOTOS) */}
                     ${sourceModalOpen && html`
                         <div className="print:hidden fixed inset-0 bg-slate-900/60 z-[60] flex items-end md:items-center justify-center p-4">
                             <div className="bg-white rounded-t-2xl md:rounded-xl shadow-2xl w-full max-w-sm overflow-hidden animate-in slide-in-from-bottom-8 md:zoom-in-95 duration-200">
