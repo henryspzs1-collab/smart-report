@@ -1120,7 +1120,7 @@ HTML_PAGE = """
                 const obs = [
                     modelName && `Modelo: ${modelName}`,
                     defect && `Defeito alegado pelo cliente: ${defect}`
-                ].filter(Boolean).join('\n\n');
+                ].filter(Boolean).join('\\n\\n');
                 createNewOs({
                     fromLaudo: { client: clientName, model: modelName, defect, generatedAt: new Date().toISOString() },
                     client: { omieClientId: null, name: clientName, document: '', email: '', phone: '' },
