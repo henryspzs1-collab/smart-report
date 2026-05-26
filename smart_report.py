@@ -667,8 +667,7 @@ def omie_servicos():
                 try:
                     data = omie_call('/servicos/servico/', 'ListarCadastroServico', {
                         "pagina": page,
-                        "registros_por_pagina": 100,
-                        "filtrar_apenas_omiepdv": "N"
+                        "registros_por_pagina": 100
                     })
                 except OmieNoRecords:
                     break
