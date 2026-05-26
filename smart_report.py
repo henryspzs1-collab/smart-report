@@ -458,6 +458,26 @@ def change_role(username):
 # ==========================================================
 OMIE_BASE = "https://app.omie.com.br/api/v1"
 
+# Cache em memória pra evitar erro REDUNDANT da Omie (que bloqueia chamadas repetidas)
+_omie_cache = {}  # key -> (timestamp_epoch, payload)
+OMIE_CACHE_TTL = 300  # 5 minutos
+
+
+def _cache_get(key):
+    import time
+    item = _omie_cache.get(key)
+    if not item:
+        return None
+    ts, payload = item
+    if time.time() - ts > OMIE_CACHE_TTL:
+        return None
+    return payload
+
+
+def _cache_set(key, payload):
+    import time
+    _omie_cache[key] = (time.time(), payload)
+
 
 class OmieError(Exception):
     def __init__(self, message, status=502, payload=None):
@@ -522,6 +542,15 @@ def _require_user():
     if full_data['users'][user].get('status') != 'active':
         return None, None, (jsonify({"error": "Conta inativa"}), 403)
     return user, full_data, None
+
+
+@app.route('/api/omie/cache/clear', methods=['POST'])
+def omie_clear_cache():
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    _omie_cache.clear()
+    return jsonify({"success": True})
 
 
 @app.route('/api/omie/status', methods=['GET'])
@@ -627,47 +656,49 @@ def omie_servicos():
     q_norm = _norm(q)
 
     try:
-        servicos = []
-        max_pages = 10  # cap para evitar abuso
-        cap_results = 50
-        page = 1
-        while page <= max_pages:
-            try:
-                data = omie_call('/servicos/servico/', 'ListarCadastroServico', {
-                    "pagina": page,
-                    "registros_por_pagina": 50,
-                    "filtrar_apenas_omiepdv": "N"
-                })
-            except OmieNoRecords:
-                break
-            registros = data.get('cadastros', []) or []
-            for s in registros:
-                intern = s.get('intItem', {}) or {}
-                cab = s.get('cabecalho', {}) or {}
-                desc = cab.get('descricao') or intern.get('descricao_servico') or ''
-                code = cab.get('codigo') or ''
-                if q_norm:
-                    desc_norm = _norm(desc)
-                    code_norm = _norm(code)
-                    if q_norm not in desc_norm and q_norm not in code_norm:
-                        continue
-                servicos.append({
-                    "id": intern.get('nCodServ'),
-                    "code": code,
-                    "description": desc,
-                    "unitPrice": float(cab.get('valor_unitario') or 0)
-                })
-                if len(servicos) >= cap_results:
+        # Pega catálogo COMPLETO do cache (uma vez a cada 5 min), filtra em memória
+        cache_key = "servicos_full"
+        all_items = _cache_get(cache_key)
+        if all_items is None:
+            all_items = []
+            page = 1
+            max_pages = 20
+            while page <= max_pages:
+                try:
+                    data = omie_call('/servicos/servico/', 'ListarCadastroServico', {
+                        "pagina": page,
+                        "registros_por_pagina": 100,
+                        "filtrar_apenas_omiepdv": "N"
+                    })
+                except OmieNoRecords:
                     break
-            if len(servicos) >= cap_results:
-                break
-            total_pages = data.get('total_de_paginas', 1) or 1
-            if page >= total_pages:
-                break
-            page += 1
+                registros = data.get('cadastros', []) or []
+                for s in registros:
+                    intern = s.get('intItem', {}) or {}
+                    cab = s.get('cabecalho', {}) or {}
+                    desc = cab.get('descricao') or intern.get('descricao_servico') or ''
+                    code = cab.get('codigo') or ''
+                    all_items.append({
+                        "id": intern.get('nCodServ'),
+                        "code": code,
+                        "description": desc,
+                        "unitPrice": float(cab.get('valor_unitario') or 0)
+                    })
+                total_pages = data.get('total_de_paginas', 1) or 1
+                if page >= total_pages:
+                    break
+                page += 1
+            _cache_set(cache_key, all_items)
+
+        # Filtra em memória
+        if q_norm:
+            filtered = [s for s in all_items if q_norm in _norm(s['description']) or q_norm in _norm(s['code'] or '')]
+        else:
+            filtered = all_items
         return jsonify({
-            "items": servicos,
-            "totalFound": len(servicos)
+            "items": filtered[:50],
+            "totalFound": len(filtered),
+            "cached": True
         })
     except OmieError as e:
         return jsonify({"error": str(e)}), e.status
@@ -686,50 +717,45 @@ def omie_produtos():
     q_norm = _norm(q)
 
     try:
-        produtos = []
-        max_pages = 10
-        cap_results = 50
-        page = 1
-        while page <= max_pages:
-            param = {
-                "pagina": page,
-                "registros_por_pagina": 50,
-                "apenas_importado_api": "N",
-                "filtrar_apenas_omiepdv": "N"
-            }
-            # Tenta passar o filtro nativo do Omie também (acelera quando funciona)
-            if q:
-                param["filtrar_por_descricao"] = q
-            try:
-                data = omie_call('/geral/produtos/', 'ListarProdutos', param)
-            except OmieNoRecords:
-                break
-            for p in data.get('produto_servico_cadastro', []) or []:
-                desc = p.get('descricao') or ''
-                code = p.get('codigo') or ''
-                if q_norm:
-                    desc_norm = _norm(desc)
-                    code_norm = _norm(code)
-                    if q_norm not in desc_norm and q_norm not in code_norm:
-                        continue
-                produtos.append({
-                    "id": p.get('codigo_produto'),
-                    "code": code,
-                    "description": desc,
-                    "unit": p.get('unidade'),
-                    "unitPrice": float(p.get('valor_unitario') or 0)
-                })
-                if len(produtos) >= cap_results:
+        cache_key = "produtos_full"
+        all_items = _cache_get(cache_key)
+        if all_items is None:
+            all_items = []
+            page = 1
+            max_pages = 20
+            while page <= max_pages:
+                param = {
+                    "pagina": page,
+                    "registros_por_pagina": 100,
+                    "apenas_importado_api": "N",
+                    "filtrar_apenas_omiepdv": "N"
+                }
+                try:
+                    data = omie_call('/geral/produtos/', 'ListarProdutos', param)
+                except OmieNoRecords:
                     break
-            if len(produtos) >= cap_results:
-                break
-            total_pages = data.get('total_de_paginas', 1) or 1
-            if page >= total_pages:
-                break
-            page += 1
+                for p in data.get('produto_servico_cadastro', []) or []:
+                    all_items.append({
+                        "id": p.get('codigo_produto'),
+                        "code": p.get('codigo') or '',
+                        "description": p.get('descricao') or '',
+                        "unit": p.get('unidade'),
+                        "unitPrice": float(p.get('valor_unitario') or 0)
+                    })
+                total_pages = data.get('total_de_paginas', 1) or 1
+                if page >= total_pages:
+                    break
+                page += 1
+            _cache_set(cache_key, all_items)
+
+        if q_norm:
+            filtered = [p for p in all_items if q_norm in _norm(p['description']) or q_norm in _norm(p['code'] or '')]
+        else:
+            filtered = all_items
         return jsonify({
-            "items": produtos,
-            "totalFound": len(produtos)
+            "items": filtered[:50],
+            "totalFound": len(filtered),
+            "cached": True
         })
     except OmieError as e:
         return jsonify({"error": str(e)}), e.status
