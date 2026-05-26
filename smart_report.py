@@ -466,6 +466,11 @@ class OmieError(Exception):
         self.payload = payload
 
 
+class OmieNoRecords(Exception):
+    """Omie retorna erro 500 com 'Não existem registros' quando uma lista vem vazia."""
+    pass
+
+
 def omie_call(endpoint: str, call: str, param: dict, timeout: int = 20):
     """Chama a API Omie. endpoint ex: '/geral/clientes/'. param é um dict (vai virar lista de 1 elemento)."""
     app_key = os.environ.get("OMIE_APP_KEY")
@@ -487,12 +492,18 @@ def omie_call(endpoint: str, call: str, param: dict, timeout: int = 20):
             raw = resp.read().decode('utf-8')
     except HTTPError as e:
         # Omie devolve erros como HTTP 500 com JSON descritivo
+        msg = f"HTTP {e.code}"
+        fault = ''
         try:
             err_body = e.read().decode('utf-8')
             err_json = json.loads(err_body)
-            msg = err_json.get('faultstring') or err_json.get('faultcode') or err_body
+            fault = err_json.get('faultstring') or err_json.get('faultcode') or err_body
+            msg = fault
         except Exception:
-            msg = f"HTTP {e.code}"
+            pass
+        # Tratamento especial: lista vazia vem como erro
+        if fault and ('ERROR-0' in fault or 'não existem registros' in fault.lower() or 'nao existem registros' in fault.lower() or 'no records' in fault.lower()):
+            raise OmieNoRecords()
         raise OmieError(f"Omie: {msg}", status=502, payload={"http": e.code})
     except URLError as e:
         raise OmieError(f"Falha de conexão com Omie: {e.reason}", status=502)
@@ -569,6 +580,8 @@ def omie_clientes():
             "totalPages": data.get('total_de_paginas', 1),
             "totalRegisters": data.get('total_de_registros', len(clientes))
         })
+    except OmieNoRecords:
+        return jsonify({"items": [], "totalRegisters": 0})
     except OmieError as e:
         return jsonify({"error": str(e)}), e.status
 
@@ -619,11 +632,14 @@ def omie_servicos():
         cap_results = 50
         page = 1
         while page <= max_pages:
-            data = omie_call('/servicos/servico/', 'ListarCadastroServico', {
-                "pagina": page,
-                "registros_por_pagina": 50,
-                "filtrar_apenas_omiepdv": "N"
-            })
+            try:
+                data = omie_call('/servicos/servico/', 'ListarCadastroServico', {
+                    "pagina": page,
+                    "registros_por_pagina": 50,
+                    "filtrar_apenas_omiepdv": "N"
+                })
+            except OmieNoRecords:
+                break
             registros = data.get('cadastros', []) or []
             for s in registros:
                 intern = s.get('intItem', {}) or {}
@@ -684,7 +700,10 @@ def omie_produtos():
             # Tenta passar o filtro nativo do Omie também (acelera quando funciona)
             if q:
                 param["filtrar_por_descricao"] = q
-            data = omie_call('/geral/produtos/', 'ListarProdutos', param)
+            try:
+                data = omie_call('/geral/produtos/', 'ListarProdutos', param)
+            except OmieNoRecords:
+                break
             for p in data.get('produto_servico_cadastro', []) or []:
                 desc = p.get('descricao') or ''
                 code = p.get('codigo') or ''
@@ -1174,17 +1193,36 @@ HTML_PAGE = """
             };
 
             // ---- helpers Omie search ----
+            const [searchMsg, setSearchMsg] = useState('');
             const searchClientes = (q) => {
+                setSearchMsg('Buscando...');
                 fetch(`/api/omie/clientes?q=${encodeURIComponent(q || '')}`, { headers: { 'Authorization': auth.token } })
-                    .then(r => r.json()).then(d => setClienteResults(d.items || []));
+                    .then(r => r.json()).then(d => {
+                        setClienteResults(d.items || []);
+                        if (d.error) setSearchMsg('Erro: ' + d.error);
+                        else if (!d.items || d.items.length === 0) setSearchMsg('Nenhum cliente encontrado no Omie.');
+                        else setSearchMsg('');
+                    }).catch(() => setSearchMsg('Erro de conexão'));
             };
             const searchServicos = (q) => {
+                setSearchMsg('Buscando...');
                 fetch(`/api/omie/servicos?q=${encodeURIComponent(q || '')}`, { headers: { 'Authorization': auth.token } })
-                    .then(r => r.json()).then(d => setServicoResults(d.items || []));
+                    .then(r => r.json()).then(d => {
+                        setServicoResults(d.items || []);
+                        if (d.error) setSearchMsg('Erro: ' + d.error);
+                        else if (!d.items || d.items.length === 0) setSearchMsg('Nenhum serviço encontrado no catálogo Omie.');
+                        else setSearchMsg(`${d.items.length} serviço(s) encontrado(s).`);
+                    }).catch(() => setSearchMsg('Erro de conexão'));
             };
             const searchProdutos = (q) => {
+                setSearchMsg('Buscando...');
                 fetch(`/api/omie/produtos?q=${encodeURIComponent(q || '')}`, { headers: { 'Authorization': auth.token } })
-                    .then(r => r.json()).then(d => setProdutoResults(d.items || []));
+                    .then(r => r.json()).then(d => {
+                        setProdutoResults(d.items || []);
+                        if (d.error) setSearchMsg('Erro: ' + d.error);
+                        else if (!d.items || d.items.length === 0) setSearchMsg('Nenhuma peça encontrada no catálogo Omie.');
+                        else setSearchMsg(`${d.items.length} peça(s) encontrada(s).`);
+                    }).catch(() => setSearchMsg('Erro de conexão'));
             };
 
             const createOmieCliente = (data) => {
@@ -2183,10 +2221,11 @@ HTML_PAGE = """
                                             <button onClick=${() => searchClientes(clienteSearch)} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded font-medium"><i className="ph-bold ph-magnifying-glass"></i></button>
                                             <button onClick=${() => setShowNewClienteModal(true)} className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded font-medium" title="Cadastrar novo cliente no Omie"><i className="ph-bold ph-plus"></i></button>
                                         </div>
+                                        ${searchMsg && html`<div className="text-xs text-slate-600 italic">${searchMsg}</div>`}
                                         ${clienteResults.length > 0 && html`
                                             <div className="border border-slate-200 rounded divide-y divide-slate-100 max-h-60 overflow-y-auto">
                                                 ${clienteResults.map(c => html`
-                                                    <button key=${c.id} onClick=${() => { updateOs({ client: { omieClientId: c.id, name: c.name, document: c.document, email: c.email, phone: c.phone } }); setClienteResults([]); setClienteSearch(''); }} className="w-full text-left p-3 hover:bg-blue-50 transition">
+                                                    <button key=${c.id} onClick=${() => { updateOs({ client: { omieClientId: c.id, name: c.name, document: c.document, email: c.email, phone: c.phone } }); setClienteResults([]); setClienteSearch(''); setSearchMsg(''); }} className="w-full text-left p-3 hover:bg-blue-50 transition">
                                                         <div className="font-medium">${c.name}</div>
                                                         <div className="text-xs text-slate-500">${c.document || ''} ${c.email ? '| ' + c.email : ''}</div>
                                                     </button>
@@ -2217,6 +2256,7 @@ HTML_PAGE = """
                                                             <input type="text" placeholder="Buscar serviço no Omie..." value=${servicoSearch.forIndex === i ? servicoSearch.q : (s.description || '')} onChange=${(e) => setServicoSearch({ q: e.target.value, forIndex: i })} className="flex-1 p-2 border border-slate-300 rounded text-sm" disabled=${isLocked} />
                                                             ${!isLocked && html`<button onClick=${() => searchServicos(servicoSearch.forIndex === i ? servicoSearch.q : (s.description || ''))} className="bg-blue-600 text-white px-3 rounded text-sm"><i className="ph-bold ph-magnifying-glass"></i></button>`}
                                                         </div>
+                                                        ${servicoSearch.forIndex === i && searchMsg && html`<div className="text-xs text-slate-600 italic">${searchMsg}</div>`}
                                                         ${servicoSearch.forIndex === i && servicoResults.length > 0 && html`
                                                             <div className="border border-slate-200 rounded divide-y divide-slate-100 max-h-40 overflow-y-auto bg-white">
                                                                 ${servicoResults.map(sr => html`
@@ -2261,6 +2301,7 @@ HTML_PAGE = """
                                                             <input type="text" placeholder="Buscar peça no Omie..." value=${produtoSearch.forIndex === i ? produtoSearch.q : (p.description || '')} onChange=${(e) => setProdutoSearch({ q: e.target.value, forIndex: i })} className="flex-1 p-2 border border-slate-300 rounded text-sm" disabled=${isLocked} />
                                                             ${!isLocked && html`<button onClick=${() => searchProdutos(produtoSearch.forIndex === i ? produtoSearch.q : (p.description || ''))} className="bg-blue-600 text-white px-3 rounded text-sm"><i className="ph-bold ph-magnifying-glass"></i></button>`}
                                                         </div>
+                                                        ${produtoSearch.forIndex === i && searchMsg && html`<div className="text-xs text-slate-600 italic">${searchMsg}</div>`}
                                                         ${produtoSearch.forIndex === i && produtoResults.length > 0 && html`
                                                             <div className="border border-slate-200 rounded divide-y divide-slate-100 max-h-40 overflow-y-auto bg-white">
                                                                 ${produtoResults.map(pr => html`
