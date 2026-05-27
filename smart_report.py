@@ -690,7 +690,7 @@ def omie_servicos():
                 except OmieNoRecords:
                     break
                 # Estrutura real do Omie /servicos/servico/:
-                # cadastros: [{ cabecalho: {cCodigo, cDescricao, nPrecoUnit}, intListar: {nCodServ}, ... }]
+                # cadastros: [{ cabecalho: {cCodigo, cDescricao, nPrecoUnit, cIdTrib, cCodServMun, cCodLC116}, intListar: {nCodServ}, ... }]
                 registros = data.get('cadastros') or []
                 for s in registros:
                     cab = s.get('cabecalho') or {}
@@ -702,7 +702,11 @@ def omie_servicos():
                         "description": (cab.get('cDescricao')
                                         or descbloco.get('cDescrCompleta')
                                         or ''),
-                        "unitPrice": float(cab.get('nPrecoUnit') or 0)
+                        "unitPrice": float(cab.get('nPrecoUnit') or 0),
+                        # Campos fiscais necessários ao IncluirOS:
+                        "cTribServ": cab.get('cIdTrib') or '01',
+                        "cCodServMun": cab.get('cCodServMun') or '',
+                        "cCodLC116": cab.get('cCodLC116') or ''
                     })
                 total_pages = data.get('nTotPaginas') or 1
                 if page >= total_pages:
@@ -905,19 +909,21 @@ def os_send(os_id):
         if idx == 0 and obs_combinada:
             desc = (desc + "\n\n" + obs_combinada).strip()
         itens.append({
-            "ide": {"codigo_servico_integracao": f"srv_{s.get('omieServiceId')}_{int(datetime.utcnow().timestamp())}_{idx}"},
-            "servico_prestado": {
-                "codigo_servico": s.get('omieServiceId'),
-                "descricao_servico": desc,
-                "quantidade": qty,
-                "valor_unitario": price
-            }
+            "nCodServico": s.get('omieServiceId'),
+            "cDescServ": desc,
+            "nQtde": qty,
+            "nValUnit": price,
+            "cTribServ": s.get('cTribServ') or '01',
+            "cCodServMun": s.get('cCodServMun') or '',
+            "cCodServLC116": s.get('cCodLC116') or ''
         })
 
     param = {
         "Cabecalho": {
             "nCodCli": cli['omieClientId'],
             "cCodIntOS": draft['id'],
+            "cCodParc": "000",
+            "nQtdeParc": 1,
             "dDtPrevisao": datetime.utcnow().strftime("%d/%m/%Y"),
             "cEtapa": "10"
         },
@@ -2304,7 +2310,7 @@ HTML_PAGE = """
                                                         ${servicoSearch.forIndex === i && servicoResults.length > 0 && html`
                                                             <div className="border border-slate-200 rounded divide-y divide-slate-100 max-h-40 overflow-y-auto bg-white">
                                                                 ${servicoResults.map(sr => html`
-                                                                    <button key=${sr.id} onClick=${() => { updateService(i, { omieServiceId: sr.id, code: sr.code, description: sr.description, unitPrice: sr.unitPrice || s.unitPrice }); setServicoSearch({ q: '', forIndex: null }); setServicoResults([]); }} className="w-full text-left p-2 text-sm hover:bg-blue-50">
+                                                                    <button key=${sr.id} onClick=${() => { updateService(i, { omieServiceId: sr.id, code: sr.code, description: sr.description, unitPrice: sr.unitPrice || s.unitPrice, cTribServ: sr.cTribServ, cCodServMun: sr.cCodServMun, cCodLC116: sr.cCodLC116 }); setServicoSearch({ q: '', forIndex: null }); setServicoResults([]); }} className="w-full text-left p-2 text-sm hover:bg-blue-50">
                                                                         <div className="font-medium">${sr.code} — ${sr.description}</div>
                                                                         <div className="text-xs text-slate-500">R$ ${(sr.unitPrice || 0).toFixed(2)}</div>
                                                                     </button>
