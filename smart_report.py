@@ -606,41 +606,68 @@ def omie_os_abertas():
         return err
     try:
         all_items = []
-        page = 1
-        max_pages = 5  # 5 pags x 50 = até 250 OSes recentes
-        while page <= max_pages:
+        total_paginas = None
+        # Vai da última página pra primeira (Omie retorna OSes em ordem cronológica - antigas primeiro)
+        # Primeiro chama página 1 só pra descobrir total_de_paginas, depois vai do fim
+        first = omie_call('/servicos/os/', 'ListarOS', {
+            "pagina": 1,
+            "registros_por_pagina": 50,
+            "apenas_importado_api": "N"
+        })
+        total_paginas = first.get('total_de_paginas') or 1
+
+        # Pega últimas 5 páginas (mais recentes ~250 OSes)
+        paginas_a_buscar = list(range(max(1, total_paginas - 4), total_paginas + 1))
+        # Inclui o resultado da página 1 só se total_paginas <= 5
+        respostas = []
+        if total_paginas <= 5:
+            respostas.append(first)
+            paginas_a_buscar = [p for p in paginas_a_buscar if p != 1]
+        for p in paginas_a_buscar:
             try:
-                data = omie_call('/servicos/os/', 'ListarOS', {
-                    "pagina": page,
+                resp = omie_call('/servicos/os/', 'ListarOS', {
+                    "pagina": p,
                     "registros_por_pagina": 50,
                     "apenas_importado_api": "N"
                 })
+                respostas.append(resp)
             except OmieNoRecords:
-                break
-            os_list = data.get('osCadastro') or []
-            for o in os_list:
+                continue
+
+        for data in respostas:
+            for o in data.get('osCadastro') or []:
                 cab = o.get('Cabecalho') or {}
-                etapa = cab.get('cEtapa') or ''
-                # Pula OSes já faturadas (etapa 50+) ou canceladas
-                if etapa in ('50', '60', '70', '80', '90', '99'):
+                info_cad = o.get('InfoCadastro') or {}
+                info_adic = o.get('InformacoesAdicionais') or {}
+                obs = o.get('Observacoes') or {}
+                # Pula faturadas e canceladas
+                if (info_cad.get('cFaturada') or 'N').upper() == 'S':
                     continue
-                info = o.get('InformacoesAdicionais') or {}
-                # Tenta achar nome do cliente (Omie só retorna o ID na listagem)
+                if (info_cad.get('cCancelada') or 'N').upper() == 'S':
+                    continue
                 all_items.append({
                     "nCodOS": cab.get('nCodOS'),
                     "cNumOS": cab.get('cNumOS'),
                     "nCodCli": cab.get('nCodCli'),
-                    "cCodIntCli": cab.get('cCodIntCli'),
-                    "cEtapa": etapa,
+                    "cCodIntOS": cab.get('cCodIntOS'),
+                    "cEtapa": cab.get('cEtapa') or '',
+                    "nValorTotal": cab.get('nValorTotal') or 0,
                     "dDtPrevisao": cab.get('dDtPrevisao'),
-                    "dDtInclusao": cab.get('dDtInclusao'),
-                    "cObs": info.get('cDadosAdicNF', '')[:100]
+                    "dDtInc": info_cad.get('dDtInc'),
+                    "cContato": (info_adic.get('cContato') or '')[:60],
+                    "cObs": ((obs.get('cObsOS') if isinstance(obs, dict) else '') or info_adic.get('cDadosAdicNF') or '')[:100]
                 })
-            total_pages = data.get('nTotPaginas') or 1
-            if page >= total_pages:
-                break
-            page += 1
-        return jsonify({"items": all_items})
+
+        # Ordena por dDtInc descendente (mais recente primeiro)
+        def _date_key(o):
+            d = o.get('dDtInc') or ''
+            try:
+                return datetime.strptime(d, '%d/%m/%Y')
+            except Exception:
+                return datetime.min
+        all_items.sort(key=_date_key, reverse=True)
+
+        return jsonify({"items": all_items[:80], "totalPaginas": total_paginas})
     except OmieError as e:
         return jsonify({"error": str(e)}), e.status
 
@@ -2990,16 +3017,17 @@ HTML_PAGE = """
                             </div>
                             <p className="text-xs text-slate-500 mb-3">OSes criadas no Omie (vendedor) e ainda não faturadas. Clique pra abrir no app, completar dados técnicos e salvar de volta.</p>
                             ${omieAbertas.length === 0 && !loadingAbertas ? html`
-                                <div className="text-center py-6 text-sm text-slate-400">Nenhuma OS aberta encontrada no Omie.</div>
+                                <div className="text-center py-6 text-sm text-slate-400">Nenhuma OS aberta (não faturada e não cancelada) encontrada nas páginas recentes do Omie.</div>
                             ` : html`
                                 <div className="overflow-x-auto rounded border border-slate-200">
                                     <table className="min-w-full text-sm">
                                         <thead className="bg-amber-50 text-slate-700">
                                             <tr>
                                                 <th className="p-2 text-left">Nº OS</th>
-                                                <th className="p-2 text-left">Cód. Integração</th>
+                                                <th className="p-2 text-left">Contato</th>
                                                 <th className="p-2 text-left">Etapa</th>
-                                                <th className="p-2 text-left">Previsão</th>
+                                                <th className="p-2 text-left">Inclusão</th>
+                                                <th className="p-2 text-right">Total</th>
                                                 <th className="p-2 text-right">Ação</th>
                                             </tr>
                                         </thead>
@@ -3009,9 +3037,10 @@ HTML_PAGE = """
                                                 return html`
                                                 <tr key=${o.nCodOS} className="hover:bg-slate-50">
                                                     <td className="p-2 font-mono text-xs">${o.cNumOS || '—'}</td>
-                                                    <td className="p-2 text-xs">${o.cCodIntCli || '—'}</td>
+                                                    <td className="p-2 text-xs">${o.cContato || '—'}</td>
                                                     <td className="p-2"><span className="bg-amber-100 text-amber-700 px-2 py-0.5 rounded text-xs font-bold">${o.cEtapa || '—'}</span></td>
-                                                    <td className="p-2 text-xs">${o.dDtPrevisao || ''}</td>
+                                                    <td className="p-2 text-xs">${o.dDtInc || ''}</td>
+                                                    <td className="p-2 text-xs text-right">R$ ${parseFloat(o.nValorTotal || 0).toFixed(2)}</td>
                                                     <td className="p-2 text-right">
                                                         ${ja ? html`
                                                             <button onClick=${() => setCurrentOs(ja)} className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-3 py-1 rounded text-xs font-medium">Abrir</button>
