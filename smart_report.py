@@ -582,6 +582,217 @@ def omie_debug_cc():
         return jsonify({"error": str(e)}), e.status
 
 
+@app.route('/api/omie/os/abertas', methods=['GET'])
+def omie_os_abertas():
+    """Lista OSes do Omie que ainda não foram faturadas/canceladas, pra técnico importar e editar."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    try:
+        all_items = []
+        page = 1
+        max_pages = 5  # 5 pags x 50 = até 250 OSes recentes
+        while page <= max_pages:
+            try:
+                data = omie_call('/servicos/os/', 'ListarOS', {
+                    "nPagina": page,
+                    "nRegPorPagina": 50,
+                    "cExibirItensPedido": "N"
+                })
+            except OmieNoRecords:
+                break
+            os_list = data.get('osCadastro') or []
+            for o in os_list:
+                cab = o.get('Cabecalho') or {}
+                etapa = cab.get('cEtapa') or ''
+                # Pula OSes já faturadas (etapa 50+) ou canceladas
+                if etapa in ('50', '60', '70', '80', '90', '99'):
+                    continue
+                info = o.get('InformacoesAdicionais') or {}
+                # Tenta achar nome do cliente (Omie só retorna o ID na listagem)
+                all_items.append({
+                    "nCodOS": cab.get('nCodOS'),
+                    "cNumOS": cab.get('cNumOS'),
+                    "nCodCli": cab.get('nCodCli'),
+                    "cCodIntCli": cab.get('cCodIntCli'),
+                    "cEtapa": etapa,
+                    "dDtPrevisao": cab.get('dDtPrevisao'),
+                    "dDtInclusao": cab.get('dDtInclusao'),
+                    "cObs": info.get('cDadosAdicNF', '')[:100]
+                })
+            total_pages = data.get('nTotPaginas') or 1
+            if page >= total_pages:
+                break
+            page += 1
+        return jsonify({"items": all_items})
+    except OmieError as e:
+        return jsonify({"error": str(e)}), e.status
+
+
+@app.route('/api/omie/os/<int:nCodOS>', methods=['GET'])
+def omie_os_consulta(nCodOS):
+    """Consulta uma OS específica no Omie e retorna em formato compatível com nosso rascunho."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    try:
+        data = omie_call('/servicos/os/', 'ConsultarOS', {"nCodOS": nCodOS})
+        cab = data.get('Cabecalho') or {}
+        info = data.get('InformacoesAdicionais') or {}
+        servicos_omie = data.get('ServicosPrestados') or []
+        produtos_omie = (data.get('produtosUtilizados') or {}).get('produtoUtilizado') or []
+
+        # Consulta cliente pra nome
+        client_name = ''
+        client_doc = ''
+        if cab.get('nCodCli'):
+            try:
+                cli_data = omie_call('/geral/clientes/', 'ConsultarCliente', {"codigo_cliente_omie": cab['nCodCli']})
+                client_name = cli_data.get('razao_social') or cli_data.get('nome_fantasia') or ''
+                client_doc = cli_data.get('cnpj_cpf') or ''
+            except OmieError:
+                pass
+
+        # Mapeia serviços Omie -> nosso formato
+        servicos = []
+        for s in servicos_omie:
+            servicos.append({
+                "omieServiceId": s.get('nCodServico'),
+                "code": '',
+                "description": s.get('cDescServ') or '',
+                "quantity": float(s.get('nQtde') or 1),
+                "unitPrice": float(s.get('nValUnit') or 0),
+                "cTribServ": s.get('cTribServ') or '01',
+                "cCodServMun": s.get('cCodServMun') or '',
+                "cCodLC116": s.get('cCodServLC116') or ''
+            })
+
+        # Mapeia produtos Omie -> peças
+        parts = []
+        for p in produtos_omie:
+            parts.append({
+                "omieProductId": p.get('nCodProdutoPU'),
+                "code": '',
+                "description": '',
+                "quantity": float(p.get('nQtdePU') or 1),
+                "unitPrice": 0
+            })
+
+        return jsonify({
+            "omieOsId": cab.get('nCodOS'),
+            "omieOsNumber": cab.get('cNumOS'),
+            "cEtapa": cab.get('cEtapa'),
+            "client": {
+                "omieClientId": cab.get('nCodCli'),
+                "name": client_name,
+                "document": client_doc,
+                "email": "",
+                "phone": ""
+            },
+            "services": servicos,
+            "parts": parts,
+            "observations": info.get('cDadosAdicNF', ''),
+            "informacoesAdicionais": {
+                "cCodCateg": info.get('cCodCateg'),
+                "nCodCC": info.get('nCodCC')
+            }
+        })
+    except OmieError as e:
+        return jsonify({"error": str(e)}), e.status
+
+
+@app.route('/api/os/importar-omie', methods=['POST'])
+def os_importar_omie():
+    """Importa uma OS do Omie como rascunho local (pra editar e depois salvar de volta com AlterarOS)."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    body = request.json or {}
+    nCodOS = body.get('nCodOS')
+    if not nCodOS:
+        return jsonify({"error": "nCodOS obrigatório"}), 400
+
+    # Consulta no Omie
+    try:
+        data = omie_call('/servicos/os/', 'ConsultarOS', {"nCodOS": int(nCodOS)})
+    except OmieError as e:
+        return jsonify({"error": str(e)}), e.status
+
+    cab = data.get('Cabecalho') or {}
+    info = data.get('InformacoesAdicionais') or {}
+    servicos_omie = data.get('ServicosPrestados') or []
+    produtos_omie = (data.get('produtosUtilizados') or {}).get('produtoUtilizado') or []
+
+    # Verifica se já tem rascunho linkado a essa OS
+    drafts = _user_drafts(full_data, user)
+    existing = next((d for d in drafts if d.get('omieOsId') == cab.get('nCodOS')), None)
+    if existing:
+        return jsonify(existing)
+
+    client_name = ''
+    client_doc = ''
+    if cab.get('nCodCli'):
+        try:
+            cli_data = omie_call('/geral/clientes/', 'ConsultarCliente', {"codigo_cliente_omie": cab['nCodCli']})
+            client_name = cli_data.get('razao_social') or cli_data.get('nome_fantasia') or ''
+            client_doc = cli_data.get('cnpj_cpf') or ''
+        except OmieError:
+            pass
+
+    servicos = []
+    for s in servicos_omie:
+        servicos.append({
+            "omieServiceId": s.get('nCodServico'),
+            "code": '',
+            "description": s.get('cDescServ') or '',
+            "quantity": float(s.get('nQtde') or 1),
+            "unitPrice": float(s.get('nValUnit') or 0),
+            "cTribServ": s.get('cTribServ') or '01',
+            "cCodServMun": s.get('cCodServMun') or '',
+            "cCodLC116": s.get('cCodServLC116') or ''
+        })
+
+    parts = []
+    for p in produtos_omie:
+        parts.append({
+            "omieProductId": p.get('nCodProdutoPU'),
+            "code": '',
+            "description": '',
+            "quantity": float(p.get('nQtdePU') or 1),
+            "unitPrice": 0
+        })
+
+    now = datetime.utcnow().isoformat() + "Z"
+    draft = {
+        "id": "os_omie_" + str(cab.get('nCodOS')),
+        "createdAt": now,
+        "updatedAt": now,
+        "createdBy": user,
+        "fromLaudo": None,
+        "client": {
+            "omieClientId": cab.get('nCodCli'),
+            "name": client_name,
+            "document": client_doc,
+            "email": "",
+            "phone": ""
+        },
+        "services": servicos,
+        "parts": parts,
+        "observations": info.get('cDadosAdicNF', ''),
+        "status": "imported",  # importada, ainda não atualizada
+        "omieOsId": cab.get('nCodOS'),
+        "omieOsNumber": cab.get('cNumOS'),
+        "importedAt": now,
+        "sentAt": None,
+        "sendError": None,
+        "cCodCategFromOmie": info.get('cCodCateg'),
+        "nCodCCFromOmie": info.get('nCodCC')
+    }
+    drafts.append(draft)
+    save_data(full_data)
+    return jsonify(draft)
+
+
 @app.route('/api/omie/cache/clear', methods=['POST'])
 def omie_clear_cache():
     user, full_data, err = _require_user()
@@ -962,6 +1173,80 @@ def os_anexar(os_id):
         return jsonify({"error": str(e)}), e.status
 
 
+@app.route('/api/os/<os_id>/anexar-fotos', methods=['POST'])
+def os_anexar_fotos(os_id):
+    """Recebe um array de imagens base64 (data URI) e anexa como ZIP único à OS Omie."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    drafts = _user_drafts(full_data, user)
+    draft = next((d for d in drafts if d['id'] == os_id), None)
+    if not draft:
+        return jsonify({"error": "Rascunho não encontrado"}), 404
+    if not draft.get('omieOsId'):
+        return jsonify({"error": "OS precisa estar enviada/sincronizada ao Omie antes de anexar fotos."}), 400
+
+    body = request.json or {}
+    fotos = body.get('photos') or []
+    if not fotos:
+        return jsonify({"error": "Nenhuma foto fornecida"}), 400
+
+    # Cria ZIP com todas as fotos
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for idx, foto in enumerate(fotos, 1):
+            src = foto.get('src') or ''
+            caption = (foto.get('caption') or f'foto_{idx}').strip()
+            # Sanitiza nome de arquivo
+            safe_name = re.sub(r'[^a-zA-Z0-9_.\- ]', '_', caption)[:60] or f'foto_{idx}'
+            # Extrai extensão do data URI
+            ext = 'jpg'
+            if 'image/png' in src:
+                ext = 'png'
+            elif 'image/webp' in src:
+                ext = 'webp'
+            # Pega só a parte base64
+            if ',' in src:
+                src = src.split(',', 1)[1]
+            try:
+                img_bytes = base64.b64decode(src)
+                zf.writestr(f"{idx:02d}_{safe_name}.{ext}", img_bytes)
+            except Exception:
+                continue
+
+    zip_content = zip_buf.getvalue()
+    if not zip_content:
+        return jsonify({"error": "Falha ao gerar ZIP"}), 500
+    md5_hash = hashlib.md5(zip_content).hexdigest()
+
+    # Pra anexo Omie, o conteúdo precisa ser zip + base64.
+    # Como já é um zip, faz outro envelope zip que contém o zip de fotos.
+    outer = io.BytesIO()
+    filename = f"fotos_OS_{draft.get('omieOsNumber') or os_id}.zip"
+    with zipfile.ZipFile(outer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(filename, zip_content)
+    outer_b64 = base64.b64encode(outer.getvalue()).decode('utf-8')
+
+    cod_int = f"fts_{os_id}_{int(datetime.utcnow().timestamp())}"[:20]
+    try:
+        omie_call('/geral/anexo/', 'IncluirAnexo', {
+            "cCodIntAnexo": cod_int,
+            "cTabela": "ordem-servico",
+            "nId": draft['omieOsId'],
+            "cNomeArquivo": filename,
+            "cTipoArquivo": "zip",
+            "cArquivo": outer_b64,
+            "cMd5": md5_hash
+        })
+        draft['fotosAnexadas'] = True
+        draft['fotosAnexadasAt'] = datetime.utcnow().isoformat() + "Z"
+        draft['fotosCount'] = len(fotos)
+        save_data(full_data)
+        return jsonify({"success": True, "count": len(fotos)})
+    except OmieError as e:
+        return jsonify({"error": str(e)}), e.status
+
+
 @app.route('/api/os/<os_id>/send', methods=['POST'])
 def os_send(os_id):
     user, full_data, err = _require_user()
@@ -973,6 +1258,9 @@ def os_send(os_id):
         return jsonify({"error": "Rascunho não encontrado"}), 404
     if draft['status'] == 'sent':
         return jsonify({"error": "OS já foi enviada anteriormente"}), 400
+
+    # Determina se é UPDATE (OS importada) ou CREATE (rascunho novo)
+    is_update = bool(draft.get('omieOsId')) and draft.get('status') == 'imported'
 
     cli = draft.get('client') or {}
     if not cli.get('omieClientId'):
@@ -1030,18 +1318,22 @@ def os_send(os_id):
     if not nCodCC:
         return jsonify({"error": "Nenhuma Conta Corrente ativa encontrada no Omie. Verifique o cadastro."}), 400
 
+    cabecalho = {
+        "nCodCli": cli['omieClientId'],
+        "cCodIntOS": draft['id'],
+        "cCodParc": "000",
+        "nQtdeParc": 1,
+        "dDtPrevisao": datetime.utcnow().strftime("%d/%m/%Y"),
+        "cEtapa": "10"
+    }
+    if is_update:
+        cabecalho["nCodOS"] = draft['omieOsId']
+
     param = {
-        "Cabecalho": {
-            "nCodCli": cli['omieClientId'],
-            "cCodIntOS": draft['id'],
-            "cCodParc": "000",
-            "nQtdeParc": 1,
-            "dDtPrevisao": datetime.utcnow().strftime("%d/%m/%Y"),
-            "cEtapa": "10"
-        },
+        "Cabecalho": cabecalho,
         "InformacoesAdicionais": {
-            "cCodCateg": cod_categ,
-            "nCodCC": nCodCC,
+            "cCodCateg": draft.get('cCodCategFromOmie') or cod_categ,
+            "nCodCC": draft.get('nCodCCFromOmie') or nCodCC,
             "cDadosAdicNF": obs_combinada or "Ordem de Serviço gerada via Biodron Smart Report Pro"
         },
         "ServicosPrestados": itens
@@ -1061,10 +1353,12 @@ def os_send(os_id):
         }
 
     try:
-        result = omie_call('/servicos/os/', 'IncluirOS', param)
+        call_name = 'AlterarOS' if is_update else 'IncluirOS'
+        result = omie_call('/servicos/os/', call_name, param)
         draft['status'] = 'sent'
-        draft['omieOsId'] = result.get('nCodOS')
-        draft['omieOsNumber'] = result.get('cNumOS')
+        if not is_update:
+            draft['omieOsId'] = result.get('nCodOS')
+            draft['omieOsNumber'] = result.get('cNumOS')
         draft['sentAt'] = datetime.utcnow().isoformat() + "Z"
         draft['sendError'] = None
         save_data(full_data)
@@ -1166,6 +1460,8 @@ HTML_PAGE = """
             const [osDrafts, setOsDrafts] = useState([]);
             const [currentOs, setCurrentOs] = useState(null);
             const [omieStatus, setOmieStatus] = useState({ checked: false, ok: false, configured: false, message: '' });
+            const [omieAbertas, setOmieAbertas] = useState([]);
+            const [loadingAbertas, setLoadingAbertas] = useState(false);
             const [clienteSearch, setClienteSearch] = useState('');
             const [clienteResults, setClienteResults] = useState([]);
             const [showNewClienteModal, setShowNewClienteModal] = useState(false);
@@ -1283,6 +1579,7 @@ HTML_PAGE = """
                 if (auth && activeTab === 'os') {
                     fetchOsDrafts();
                     checkOmieStatus();
+                    fetchOmieAbertas();
                 }
             }, [activeTab, auth]);
 
@@ -1412,6 +1709,60 @@ HTML_PAGE = """
                     headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
                     body: JSON.stringify(data)
                 }).then(r => r.json());
+            };
+
+            const fetchOmieAbertas = () => {
+                setLoadingAbertas(true);
+                fetch('/api/omie/os/abertas', { headers: { 'Authorization': auth.token } })
+                    .then(r => r.json()).then(d => {
+                        setOmieAbertas(d.items || []);
+                        setLoadingAbertas(false);
+                    }).catch(() => setLoadingAbertas(false));
+            };
+
+            const importarOsDoOmie = (nCodOS) => {
+                fetch('/api/os/importar-omie', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                    body: JSON.stringify({ nCodOS })
+                }).then(r => r.json()).then(d => {
+                    if (d.id) {
+                        setCurrentOs(d);
+                        fetchOsDrafts();
+                    } else {
+                        alert(d.error || 'Erro ao importar OS');
+                    }
+                });
+            };
+
+            const anexarFotosLaudo = async () => {
+                if (!currentOs || !currentOs.omieOsId) {
+                    alert('A OS precisa estar enviada/importada do Omie.');
+                    return;
+                }
+                if (!reportImages || reportImages.length === 0) {
+                    alert('Nenhuma foto no laudo atual. Adicione fotos na aba "Preencher Laudo" primeiro.');
+                    return;
+                }
+                if (!confirm(`Anexar ${reportImages.length} foto(s) à OS no Omie como ZIP?`)) return;
+
+                try {
+                    const resp = await fetch(`/api/os/${currentOs.id}/anexar-fotos`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                        body: JSON.stringify({ photos: reportImages })
+                    });
+                    const data = await resp.json();
+                    if (data.success) {
+                        alert(`${data.count} foto(s) anexada(s) com sucesso!`);
+                        setCurrentOs(prev => ({ ...prev, fotosAnexadas: true, fotosCount: data.count }));
+                        fetchOsDrafts();
+                    } else {
+                        alert('Erro: ' + (data.error || 'desconhecido'));
+                    }
+                } catch (err) {
+                    alert('Erro: ' + (err.message || err));
+                }
             };
 
             const anexarLaudoPDF = async () => {
@@ -2429,17 +2780,26 @@ HTML_PAGE = """
                                     <button onClick=${() => setCurrentOs(null)} className="text-sm text-slate-500 hover:text-slate-700"><i className="ph-bold ph-arrow-left"></i> Voltar para lista</button>
                                     <h2 className="text-xl font-bold text-slate-800 mt-1 flex items-center gap-2">
                                         <i className="ph-fill ph-clipboard-text text-indigo-600 text-2xl"></i>
-                                        ${isLocked ? `OS #${currentOs.omieOsNumber || currentOs.omieOsId} (enviada)` : 'Editar Rascunho de OS'}
+                                        ${isLocked
+                                            ? `OS #${currentOs.omieOsNumber || currentOs.omieOsId} (enviada)`
+                                            : (currentOs.status === 'imported'
+                                                ? `Editando OS #${currentOs.omieOsNumber || currentOs.omieOsId} (vinda do Omie)`
+                                                : 'Editar Rascunho de OS')}
                                     </h2>
                                 </div>
                                 <div className="flex gap-2 flex-wrap">
                                     ${!isLocked && html`
                                         <button onClick=${() => saveCurrentOs(false)} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded font-medium flex items-center gap-1"><i className="ph-bold ph-floppy-disk"></i> Salvar</button>
-                                        <button onClick=${sendOsToOmie} disabled=${!omieStatus.ok} className=${`px-4 py-2 rounded font-medium flex items-center gap-1 text-white ${omieStatus.ok ? 'bg-green-600 hover:bg-green-700' : 'bg-slate-400 cursor-not-allowed'}`}><i className="ph-bold ph-paper-plane-tilt"></i> Enviar pro Omie</button>
+                                        <button onClick=${sendOsToOmie} disabled=${!omieStatus.ok} className=${`px-4 py-2 rounded font-medium flex items-center gap-1 text-white ${omieStatus.ok ? 'bg-green-600 hover:bg-green-700' : 'bg-slate-400 cursor-not-allowed'}`}>
+                                            <i className="ph-bold ph-paper-plane-tilt"></i> ${currentOs.status === 'imported' ? 'Atualizar OS no Omie' : 'Enviar pro Omie'}
+                                        </button>
                                     `}
-                                    ${isLocked && currentOs.fromLaudo && html`
+                                    ${(isLocked || currentOs.status === 'imported') && currentOs.omieOsId && html`
                                         <button onClick=${anexarLaudoPDF} className=${`px-4 py-2 rounded font-medium flex items-center gap-1 text-white ${currentOs.pdfAnexado ? 'bg-slate-500 hover:bg-slate-600' : 'bg-purple-600 hover:bg-purple-700'}`}>
-                                            <i className="ph-bold ph-paperclip"></i> ${currentOs.pdfAnexado ? 'Re-anexar PDF do Laudo' : 'Anexar PDF do Laudo'}
+                                            <i className="ph-bold ph-paperclip"></i> ${currentOs.pdfAnexado ? 'Re-anexar Laudo' : 'Anexar PDF do Laudo'}
+                                        </button>
+                                        <button onClick=${anexarFotosLaudo} className=${`px-4 py-2 rounded font-medium flex items-center gap-1 text-white ${currentOs.fotosAnexadas ? 'bg-slate-500 hover:bg-slate-600' : 'bg-pink-600 hover:bg-pink-700'}`}>
+                                            <i className="ph-bold ph-images"></i> ${currentOs.fotosAnexadas ? `Re-anexar Fotos (${currentOs.fotosCount || 0})` : 'Anexar Fotos (ZIP)'}
                                         </button>
                                     `}
                                 </div>
@@ -2603,6 +2963,52 @@ HTML_PAGE = """
                                 ${!omieStatus.ok && html`<div className="text-sm text-amber-700">${omieStatus.message || 'Cadastre OMIE_APP_KEY e OMIE_APP_SECRET nas variáveis de ambiente do servidor.'}</div>`}
                             </div>
                             <button onClick=${checkOmieStatus} className="text-sm bg-white border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50"><i className="ph-bold ph-arrows-clockwise"></i> Testar</button>
+                        </div>
+
+                        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                            <div className="flex justify-between items-center mb-4">
+                                <h2 className="text-xl font-semibold text-slate-800 flex items-center gap-2"><i className="ph-fill ph-cloud-arrow-down text-amber-600 text-2xl"></i> OSes Abertas no Omie (${omieAbertas.length})</h2>
+                                <button onClick=${fetchOmieAbertas} disabled=${loadingAbertas} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded text-sm font-medium flex items-center gap-1 disabled:opacity-50">
+                                    <i className=${`ph-bold ph-arrows-clockwise ${loadingAbertas ? 'animate-spin' : ''}`}></i> ${loadingAbertas ? 'Carregando...' : 'Atualizar'}
+                                </button>
+                            </div>
+                            <p className="text-xs text-slate-500 mb-3">OSes criadas no Omie (vendedor) e ainda não faturadas. Clique pra abrir no app, completar dados técnicos e salvar de volta.</p>
+                            ${omieAbertas.length === 0 && !loadingAbertas ? html`
+                                <div className="text-center py-6 text-sm text-slate-400">Nenhuma OS aberta encontrada no Omie.</div>
+                            ` : html`
+                                <div className="overflow-x-auto rounded border border-slate-200">
+                                    <table className="min-w-full text-sm">
+                                        <thead className="bg-amber-50 text-slate-700">
+                                            <tr>
+                                                <th className="p-2 text-left">Nº OS</th>
+                                                <th className="p-2 text-left">Cód. Integração</th>
+                                                <th className="p-2 text-left">Etapa</th>
+                                                <th className="p-2 text-left">Previsão</th>
+                                                <th className="p-2 text-right">Ação</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100">
+                                            ${omieAbertas.map(o => {
+                                                const ja = osDrafts.find(d => d.omieOsId === o.nCodOS);
+                                                return html`
+                                                <tr key=${o.nCodOS} className="hover:bg-slate-50">
+                                                    <td className="p-2 font-mono text-xs">${o.cNumOS || '—'}</td>
+                                                    <td className="p-2 text-xs">${o.cCodIntCli || '—'}</td>
+                                                    <td className="p-2"><span className="bg-amber-100 text-amber-700 px-2 py-0.5 rounded text-xs font-bold">${o.cEtapa || '—'}</span></td>
+                                                    <td className="p-2 text-xs">${o.dDtPrevisao || ''}</td>
+                                                    <td className="p-2 text-right">
+                                                        ${ja ? html`
+                                                            <button onClick=${() => setCurrentOs(ja)} className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-3 py-1 rounded text-xs font-medium">Abrir</button>
+                                                        ` : html`
+                                                            <button onClick=${() => importarOsDoOmie(o.nCodOS)} className="bg-amber-600 hover:bg-amber-700 text-white px-3 py-1 rounded text-xs font-medium"><i className="ph-bold ph-download-simple"></i> Importar</button>
+                                                        `}
+                                                    </td>
+                                                </tr>
+                                            `})}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            `}
                         </div>
 
                         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
