@@ -1529,13 +1529,23 @@ def os_send(os_id):
     sys.stdout.flush()
 
     # Adiciona peças como "produtosUtilizados" (saída de estoque)
-    if draft.get('parts'):
+    # Só inclui o bloco se tiver pelo menos UMA peça válida com omieProductId
+    parts_validas = [p for p in (draft.get('parts') or []) if p.get('omieProductId')]
+    if parts_validas:
         produtos_utilizados = []
-        for p in draft.get('parts', []):
-            produtos_utilizados.append({
-                "nCodProdutoPU": p.get('omieProductId'),
+        for p in parts_validas:
+            prod_item = {
+                "nCodProdutoPU": int(p.get('omieProductId') or 0),
                 "nQtdePU": float(p.get('quantity') or 1)
-            })
+            }
+            # Se tem nIdItem original (peça veio do import), é alteração
+            if p.get('nIdItem'):
+                prod_item["nIdItemPU"] = int(p['nIdItem'])
+                prod_item["cAcaoItemPU"] = "A"
+            else:
+                # Peça nova
+                prod_item["cAcaoItemPU"] = "I"
+            produtos_utilizados.append(prod_item)
         param["produtosUtilizados"] = {
             "cAcaoProdUtilizados": "EST",
             "produtoUtilizado": produtos_utilizados
