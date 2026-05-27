@@ -1438,14 +1438,16 @@ def os_send(os_id):
 
     itens = []
     for idx, s in enumerate(draft.get('services', [])):
-        if not s.get('omieServiceId'):
+        sid = s.get('omieServiceId')
+        # nCodServico = 0 é válido na Omie (serviço genérico, só descrição). None/null não é.
+        if sid is None:
             return jsonify({"error": f"Serviço '{s.get('description','')}' não está vinculado ao catálogo Omie."}), 400
         qty = float(s.get('quantity') or 1)
         price = float(s.get('unitPrice') or 0)
         desc = s.get('description') or ''
         item = {
             "nSeqItem": idx + 1,
-            "nCodServico": s.get('omieServiceId'),
+            "nCodServico": int(sid),
             "cDescServ": desc,
             "nQtde": qty,
             "nValUnit": price,
