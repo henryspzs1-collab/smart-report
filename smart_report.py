@@ -730,7 +730,8 @@ def omie_servicos():
                         # Campos fiscais necessários ao IncluirOS:
                         "cTribServ": cab.get('cIdTrib') or '01',
                         "cCodServMun": cab.get('cCodServMun') or '',
-                        "cCodLC116": cab.get('cCodLC116') or ''
+                        "cCodLC116": cab.get('cCodLC116') or '',
+                        "cCodCateg": cab.get('cCodCateg') or ''
                     })
                 total_pages = data.get('nTotPaginas') or 1
                 if page >= total_pages:
@@ -934,6 +935,10 @@ def os_send(os_id):
             "cCodServLC116": s.get('cCodLC116') or ''
         })
 
+    # Pega cCodCateg do primeiro serviço (todos da OS compartilham essa categoria)
+    primeiro_servico = draft.get('services', [{}])[0]
+    cod_categ = primeiro_servico.get('cCodCateg') or '1.01.02'
+
     param = {
         "Cabecalho": {
             "nCodCli": cli['omieClientId'],
@@ -944,6 +949,7 @@ def os_send(os_id):
             "cEtapa": "10"
         },
         "InformacoesAdicionais": {
+            "cCodCateg": cod_categ,
             "cDadosAdicNF": obs_combinada or "Ordem de Serviço gerada via Biodron Smart Report Pro"
         },
         "ServicosPrestados": itens
@@ -2329,7 +2335,7 @@ HTML_PAGE = """
                                                         ${servicoSearch.forIndex === i && servicoResults.length > 0 && html`
                                                             <div className="border border-slate-200 rounded divide-y divide-slate-100 max-h-40 overflow-y-auto bg-white">
                                                                 ${servicoResults.map(sr => html`
-                                                                    <button key=${sr.id} onClick=${() => { updateService(i, { omieServiceId: sr.id, code: sr.code, description: sr.description, unitPrice: sr.unitPrice || s.unitPrice, cTribServ: sr.cTribServ, cCodServMun: sr.cCodServMun, cCodLC116: sr.cCodLC116 }); setServicoSearch({ q: '', forIndex: null }); setServicoResults([]); }} className="w-full text-left p-2 text-sm hover:bg-blue-50">
+                                                                    <button key=${sr.id} onClick=${() => { updateService(i, { omieServiceId: sr.id, code: sr.code, description: sr.description, unitPrice: sr.unitPrice || s.unitPrice, cTribServ: sr.cTribServ, cCodServMun: sr.cCodServMun, cCodLC116: sr.cCodLC116, cCodCateg: sr.cCodCateg }); setServicoSearch({ q: '', forIndex: null }); setServicoResults([]); }} className="w-full text-left p-2 text-sm hover:bg-blue-50">
                                                                         <div className="font-medium">${sr.code} — ${sr.description}</div>
                                                                         <div className="text-xs text-slate-500">R$ ${(sr.unitPrice || 0).toFixed(2)}</div>
                                                                     </button>
