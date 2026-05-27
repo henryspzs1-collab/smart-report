@@ -1500,8 +1500,15 @@ def os_send(os_id):
         "ServicosPrestados": itens
     }
 
-    # Log de debug pra próxima tentativa
-    print(f"[OS-SEND] is_update={is_update} call={'AlterarOS' if is_update else 'IncluirOS'} nCodOS={cabecalho.get('nCodOS')} cCodIntOS={cabecalho.get('cCodIntOS')}")
+    # Pra AlterarOS, manda nCodOS também no root level (Omie é inconsistente entre endpoints)
+    if is_update:
+        param["nCodOS"] = int(draft['omieOsId'])
+
+    # Log de debug
+    import sys
+    print(f"[OS-SEND] is_update={is_update} call={'AlterarOS' if is_update else 'IncluirOS'}", flush=True)
+    print(f"[OS-SEND] PAYLOAD: {json.dumps(param, ensure_ascii=False)[:800]}", flush=True)
+    sys.stdout.flush()
 
     # Adiciona peças como "produtosUtilizados" (saída de estoque)
     if draft.get('parts'):
