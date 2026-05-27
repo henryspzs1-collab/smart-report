@@ -896,8 +896,47 @@ def omie_clear_cache():
     user, full_data, err = _require_user()
     if err:
         return err
+    global _omie_cache_dirty
     _omie_cache.clear()
+    _omie_cache_dirty = True
+    _flush_omie_cache()
+    # Apaga o arquivo do disco também
+    try:
+        if os.path.exists(_omie_cache_path()):
+            os.remove(_omie_cache_path())
+    except Exception:
+        pass
     return jsonify({"success": True})
+
+
+@app.route('/api/omie/cache/info', methods=['GET'])
+def omie_cache_info():
+    """Mostra resumo do que está em cache + idade de cada item."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    import time
+    info = []
+    now = time.time()
+    for k, v in _omie_cache.items():
+        age = int(now - v.get('ts', 0))
+        # Não devolve o payload, só metadata
+        item_count = None
+        data = v.get('data')
+        if isinstance(data, list):
+            item_count = len(data)
+        elif isinstance(data, dict):
+            item_count = len(data)
+        info.append({
+            "key": k,
+            "age_seconds": age,
+            "age_hours": round(age / 3600, 1),
+            "expired": age > OMIE_CACHE_TTL,
+            "items": item_count,
+            "type": type(data).__name__
+        })
+    info.sort(key=lambda x: x['age_seconds'])
+    return jsonify({"entries": info, "ttl_seconds": OMIE_CACHE_TTL, "path": _omie_cache_path()})
 
 
 @app.route('/api/omie/status', methods=['GET'])
@@ -1668,6 +1707,17 @@ HTML_PAGE = """
                 fetch('/api/os', { headers: { 'Authorization': auth.token } })
                     .then(r => r.json()).then(d => { if(Array.isArray(d)) setOsDrafts(d); });
             };
+            const clearOmieCache = () => {
+                if (!confirm('Limpar cache Omie? A próxima busca vai puxar tudo de novo do Omie (pode demorar).')) return;
+                fetch('/api/omie/cache/clear', {
+                    method: 'POST',
+                    headers: { 'Authorization': auth.token }
+                }).then(r => r.json()).then(() => {
+                    alert('Cache limpo! Próxima busca vai puxar dados frescos do Omie.');
+                    if (activeTab === 'os') fetchOmieAbertas();
+                });
+            };
+
             const checkOmieStatus = () => {
                 fetch('/api/omie/status', { headers: { 'Authorization': auth.token } })
                     .then(r => r.json()).then(d => setOmieStatus({ checked: true, ok: !!d.ok, configured: !!d.configured, message: d.message || '' }))
@@ -3096,8 +3146,10 @@ HTML_PAGE = """
                             <div className="flex-1">
                                 <div className="font-bold ${omieStatus.ok ? 'text-green-800' : 'text-amber-800'}">${omieStatus.ok ? 'Conectado ao Omie' : (omieStatus.configured ? 'Erro de conexão Omie' : 'Omie não configurado')}</div>
                                 ${!omieStatus.ok && html`<div className="text-sm text-amber-700">${omieStatus.message || 'Cadastre OMIE_APP_KEY e OMIE_APP_SECRET nas variáveis de ambiente do servidor.'}</div>`}
+                                ${omieStatus.ok && html`<div className="text-xs text-green-700">Cache em disco persistente (24h). Use "Limpar cache" se cadastrar serviços/peças/clientes novos no Omie.</div>`}
                             </div>
-                            <button onClick=${checkOmieStatus} className="text-sm bg-white border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50"><i className="ph-bold ph-arrows-clockwise"></i> Testar</button>
+                            <button onClick=${checkOmieStatus} className="text-sm bg-white border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50" title="Testar conexão"><i className="ph-bold ph-arrows-clockwise"></i> Testar</button>
+                            <button onClick=${clearOmieCache} className="text-sm bg-white border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50" title="Limpa cache local de catálogos do Omie"><i className="ph-bold ph-broom"></i> Limpar cache</button>
                         </div>
 
                         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
