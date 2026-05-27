@@ -562,6 +562,22 @@ def omie_debug_servicos():
         return jsonify({"error": str(e)}), e.status
 
 
+@app.route('/api/omie/debug/contacorrente', methods=['GET'])
+def omie_debug_cc():
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    try:
+        data = omie_call('/geral/contacorrente/', 'ListarContasCorrentes', {
+            "pagina": 1,
+            "registros_por_pagina": 5,
+            "apenas_importado_api": "N"
+        })
+        return jsonify(data)
+    except OmieError as e:
+        return jsonify({"error": str(e)}), e.status
+
+
 @app.route('/api/omie/cache/clear', methods=['POST'])
 def omie_clear_cache():
     user, full_data, err = _require_user()
