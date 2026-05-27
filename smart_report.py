@@ -884,7 +884,8 @@ def os_importar_omie():
         "sentAt": None,
         "sendError": None,
         "cCodCategFromOmie": info.get('cCodCateg'),
-        "nCodCCFromOmie": info.get('nCodCC')
+        "nCodCCFromOmie": info.get('nCodCC'),
+        "cCodIntOSOriginal": cab.get('cCodIntOS') or ''
     }
     drafts.append(draft)
     save_data(full_data)
@@ -1486,6 +1487,17 @@ def os_send(os_id):
     if is_update:
         # Pra AlterarOS, manda nCodOS dentro do Cabecalho (identifica a OS no Omie)
         cabecalho["nCodOS"] = int(draft['omieOsId'])
+        # Preserva cCodIntOS original (consulta no Omie se ainda não tem cacheado)
+        cci_orig = draft.get('cCodIntOSOriginal')
+        if cci_orig is None:
+            try:
+                consulta = omie_call('/servicos/os/', 'ConsultarOS', {"nCodOS": int(draft['omieOsId'])})
+                cci_orig = (consulta.get('Cabecalho') or {}).get('cCodIntOS') or ''
+                draft['cCodIntOSOriginal'] = cci_orig
+            except OmieError:
+                cci_orig = ''
+        if cci_orig:
+            cabecalho["cCodIntOS"] = cci_orig
     else:
         # Pra IncluirOS, manda cCodIntOS como código de integração local
         cabecalho["cCodIntOS"] = draft['id']
@@ -1500,14 +1512,10 @@ def os_send(os_id):
         "ServicosPrestados": itens
     }
 
-    # Pra AlterarOS, manda nCodOS também no root level (Omie é inconsistente entre endpoints)
-    if is_update:
-        param["nCodOS"] = int(draft['omieOsId'])
-
     # Log de debug
     import sys
     print(f"[OS-SEND] is_update={is_update} call={'AlterarOS' if is_update else 'IncluirOS'}", flush=True)
-    print(f"[OS-SEND] PAYLOAD: {json.dumps(param, ensure_ascii=False)[:800]}", flush=True)
+    print(f"[OS-SEND] PAYLOAD: {json.dumps(param, ensure_ascii=False)[:1200]}", flush=True)
     sys.stdout.flush()
 
     # Adiciona peças como "produtosUtilizados" (saída de estoque)
