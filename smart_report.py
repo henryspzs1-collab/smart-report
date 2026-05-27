@@ -462,9 +462,45 @@ def change_role(username):
 # ==========================================================
 OMIE_BASE = "https://app.omie.com.br/api/v1"
 
-# Cache em memória pra evitar erro REDUNDANT da Omie (que bloqueia chamadas repetidas)
-_omie_cache = {}  # key -> (timestamp_epoch, payload)
-OMIE_CACHE_TTL = 300  # 5 minutos
+# Cache híbrido: em memória + persistido em disco no /data (persistente entre deploys/restarts).
+# TTL longo (24h) porque catálogo Omie muda raramente. Usuário pode forçar refresh manual.
+OMIE_CACHE_TTL = 86400  # 24 horas
+
+
+def _omie_cache_path():
+    base = os.path.dirname(DATA_FILE) or '.'
+    return os.path.join(base, 'omie_cache.json')
+
+
+def _load_omie_cache():
+    path = _omie_cache_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+_omie_cache = _load_omie_cache()
+_omie_cache_dirty = False
+
+
+def _flush_omie_cache():
+    """Salva cache em disco. Chamado periodicamente / quando há mudança."""
+    global _omie_cache_dirty
+    if not _omie_cache_dirty:
+        return
+    path = _omie_cache_path()
+    try:
+        tmp = path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(_omie_cache, f, ensure_ascii=False)
+        os.replace(tmp, path)
+        _omie_cache_dirty = False
+    except Exception:
+        pass
 
 
 def _cache_get(key):
@@ -472,15 +508,18 @@ def _cache_get(key):
     item = _omie_cache.get(key)
     if not item:
         return None
-    ts, payload = item
+    ts = item.get('ts', 0)
     if time.time() - ts > OMIE_CACHE_TTL:
         return None
-    return payload
+    return item.get('data')
 
 
 def _cache_set(key, payload):
     import time
-    _omie_cache[key] = (time.time(), payload)
+    global _omie_cache_dirty
+    _omie_cache[key] = {'ts': time.time(), 'data': payload}
+    _omie_cache_dirty = True
+    _flush_omie_cache()
 
 
 class OmieError(Exception):
