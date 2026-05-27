@@ -1512,6 +1512,7 @@ HTML_PAGE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="google" content="notranslate">
     <title>Biodron Smart Report Pro - Baterias</title>
 
     <script src="https://cdn.tailwindcss.com"></script>
@@ -2599,13 +2600,24 @@ HTML_PAGE = """
                             <input type="file" accept="image/*" multiple ref=${galleryInputRef} onChange=${handleFileSelect} className="hidden" />
                         </div>
 
-                        <div className="bg-gradient-to-r from-indigo-50 to-blue-50 border-2 border-indigo-200 p-5 rounded-xl flex flex-col md:flex-row items-start md:items-center gap-4">
-                            <div className="flex-1">
-                                <h3 className="font-bold text-indigo-900 flex items-center gap-2"><i className="ph-fill ph-clipboard-text text-indigo-600 text-xl"></i> Gerar Ordem de Serviço</h3>
-                                <p className="text-sm text-indigo-700 mt-1">Crie uma OS pré-preenchida com base nos dados deste laudo. Você poderá adicionar serviços e peças, e enviar pro Omie.</p>
+                        ${!currentOs && html`
+                            <div className="bg-gradient-to-r from-indigo-50 to-blue-50 border-2 border-indigo-200 p-5 rounded-xl flex flex-col md:flex-row items-start md:items-center gap-4">
+                                <div className="flex-1">
+                                    <h3 className="font-bold text-indigo-900 flex items-center gap-2"><i className="ph-fill ph-clipboard-text text-indigo-600 text-xl"></i> Gerar Ordem de Serviço</h3>
+                                    <p className="text-sm text-indigo-700 mt-1">Crie uma OS pré-preenchida com base nos dados deste laudo. Você poderá adicionar serviços e peças, e enviar pro Omie.</p>
+                                </div>
+                                <button onClick=${generateOsFromCurrentLaudo} className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2.5 rounded-lg font-bold flex items-center gap-2 shadow-md whitespace-nowrap"><i className="ph-bold ph-arrow-right"></i> Gerar OS deste Laudo</button>
                             </div>
-                            <button onClick=${generateOsFromCurrentLaudo} className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2.5 rounded-lg font-bold flex items-center gap-2 shadow-md whitespace-nowrap"><i className="ph-bold ph-arrow-right"></i> Gerar OS deste Laudo</button>
-                        </div>
+                        `}
+                        ${currentOs && html`
+                            <div className="bg-gradient-to-r from-green-50 to-emerald-50 border-2 border-green-200 p-5 rounded-xl flex flex-col md:flex-row items-start md:items-center gap-4">
+                                <div className="flex-1">
+                                    <h3 className="font-bold text-green-900 flex items-center gap-2"><i className="ph-fill ph-check-circle text-green-600 text-xl"></i> Laudo Finalizado?</h3>
+                                    <p className="text-sm text-green-700 mt-1">Volte pra OS #${currentOs.omieOsNumber || currentOs.id} pra anexar este laudo (PDF + fotos) e atualizar no Omie.</p>
+                                </div>
+                                <button onClick=${() => setActiveTab('os')} className="bg-green-600 hover:bg-green-700 text-white px-5 py-2.5 rounded-lg font-bold flex items-center gap-2 shadow-md whitespace-nowrap"><i className="ph-bold ph-arrow-right"></i> Voltar pra OS</button>
+                            </div>
+                        `}
 
                         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                             <h2 className="text-xl font-semibold mb-4 text-slate-800 flex items-center gap-2">
