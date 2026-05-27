@@ -1393,11 +1393,13 @@ def os_send(os_id):
     draft = next((d for d in drafts if d['id'] == os_id), None)
     if not draft:
         return jsonify({"error": "Rascunho não encontrado"}), 404
-    if draft['status'] == 'sent':
-        return jsonify({"error": "OS já foi enviada anteriormente"}), 400
 
-    # Determina se é UPDATE (OS importada) ou CREATE (rascunho novo)
-    is_update = bool(draft.get('omieOsId')) and draft.get('status') == 'imported'
+    # Determina se é UPDATE (já existe no Omie) ou CREATE (rascunho novo)
+    is_update = bool(draft.get('omieOsId'))
+
+    # Só bloqueia "já enviado" pra rascunhos novos (não pra OSes importadas do Omie)
+    if not is_update and draft.get('status') == 'sent':
+        return jsonify({"error": "OS já foi enviada anteriormente"}), 400
 
     cli = draft.get('client') or {}
     if not cli.get('omieClientId'):
@@ -1802,15 +1804,17 @@ HTML_PAGE = """
             const sendOsToOmie = () => {
                 if (!currentOs) return;
                 setOsSendError('');
-                saveCurrentOs(true).then(() => {
-                    fetch(`/api/os/${currentOs.id}/send`, {
+                saveCurrentOs(true).then((savedOs) => {
+                    // Usa o id atualizado (caso tenha sido re-importado) ou o atual
+                    const osId = (savedOs && savedOs.id) || currentOs.id;
+                    fetch(`/api/os/${osId}/send`, {
                         method: 'POST',
                         headers: { 'Authorization': auth.token }
                     }).then(r => r.json().then(data => ({status: r.status, data}))).then(({status, data}) => {
                         if (data.id && data.status === 'sent') {
                             setCurrentOs(data);
                             fetchOsDrafts();
-                            alert(`OS enviada para o Omie! Número: ${data.omieOsNumber || data.omieOsId}`);
+                            alert(`OS atualizada no Omie! Número: ${data.omieOsNumber || data.omieOsId}`);
                         } else {
                             setOsSendError(data.error || 'Erro ao enviar');
                         }
