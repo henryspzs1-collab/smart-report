@@ -1836,11 +1836,25 @@ HTML_PAGE = """
                             body: JSON.stringify({ nCodOS: currentOs.omieOsId })
                         }).then(r => r.json()).then(re => {
                             if (re.id) {
-                                // Mantém os dados editados pelo usuário em memória, mas atualiza o id local pra match no backend
+                                // Mantém os dados editados pelo usuário, mas atualiza o id local
                                 const merged = { ...currentOs, id: re.id, status: 'imported', omieOsId: re.omieOsId, omieOsNumber: re.omieOsNumber };
-                                setCurrentOs(merged);
-                                fetchOsDrafts();
-                                return merged;
+                                // PERSISTE no disco via PUT com os dados editados pelo usuário
+                                return fetch(`/api/os/${re.id}`, {
+                                    method: 'PUT',
+                                    headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                                    body: JSON.stringify({
+                                        client: merged.client,
+                                        services: merged.services,
+                                        parts: merged.parts,
+                                        observations: merged.observations,
+                                        fromLaudo: merged.fromLaudo
+                                    })
+                                }).then(r2 => r2.json()).then(persisted => {
+                                    const final = persisted && persisted.id ? persisted : merged;
+                                    setCurrentOs(final);
+                                    fetchOsDrafts();
+                                    return final;
+                                });
                             }
                             return null;
                         });
