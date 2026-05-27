@@ -544,6 +544,24 @@ def _require_user():
     return user, full_data, None
 
 
+@app.route('/api/omie/debug/servicos', methods=['GET'])
+def omie_debug_servicos():
+    """Retorna a resposta crua da Omie para inspecionarmos a estrutura."""
+    user, full_data, err = _require_admin()
+    if err:
+        return err
+    try:
+        data = omie_call('/servicos/servico/', 'ListarCadastroServico', {
+            "nPagina": 1,
+            "nRegPorPagina": 3
+        })
+        return jsonify(data)
+    except OmieNoRecords:
+        return jsonify({"empty": True})
+    except OmieError as e:
+        return jsonify({"error": str(e)}), e.status
+
+
 @app.route('/api/omie/cache/clear', methods=['POST'])
 def omie_clear_cache():
     user, full_data, err = _require_user()
@@ -673,24 +691,37 @@ def omie_servicos():
                     break
                 # A resposta também usa nomes camelCase para serviços
                 registros = data.get('cadastros') or data.get('servicoCadastro') or []
+
+                def _flat(v):
+                    """Converte qualquer valor pra string segura. Se for dict, pega o primeiro valor textual."""
+                    if v is None:
+                        return ''
+                    if isinstance(v, (str, int, float)):
+                        return str(v)
+                    if isinstance(v, dict):
+                        for vv in v.values():
+                            if isinstance(vv, (str, int, float)):
+                                return str(vv)
+                        return ''
+                    if isinstance(v, list):
+                        return ', '.join(_flat(x) for x in v if x)
+                    return str(v)
+
+                def _flat_num(v):
+                    try:
+                        return float(_flat(v) or 0)
+                    except (TypeError, ValueError):
+                        return 0.0
+
                 for s in registros:
                     intern = s.get('intItem', {}) or s.get('intCadastro', {}) or {}
                     cab = s.get('cabecalho', {}) or s.get('cab', {}) or {}
-                    # Tenta diversos caminhos pra descrição e código
-                    desc = (cab.get('descricao')
-                            or intern.get('descricao_servico')
-                            or s.get('descricao')
-                            or '')
-                    code = (cab.get('codigo')
-                            or s.get('codigo')
-                            or intern.get('codigo')
-                            or '')
-                    sid = (intern.get('nCodServ')
-                           or s.get('nCodServ')
-                           or s.get('codigo_servico'))
-                    price = float(cab.get('valor_unitario') or s.get('valor_unitario') or 0)
+                    desc = _flat(cab.get('descricao') or intern.get('descricao_servico') or intern.get('descricao') or s.get('descricao') or '')
+                    code = _flat(cab.get('codigo') or intern.get('codigo') or s.get('codigo') or '')
+                    sid = (intern.get('nCodServ') or s.get('nCodServ') or s.get('codigo_servico'))
+                    price = _flat_num(cab.get('valor_unitario') or intern.get('valor_unitario') or s.get('valor_unitario') or 0)
                     all_items.append({
-                        "id": sid,
+                        "id": sid if isinstance(sid, (int, float, str)) else _flat(sid),
                         "code": code,
                         "description": desc,
                         "unitPrice": price
