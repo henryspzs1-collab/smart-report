@@ -2336,7 +2336,7 @@ HTML_PAGE = """
                                         ${clienteResults.length > 0 && html`
                                             <div className="border border-slate-200 rounded divide-y divide-slate-100 max-h-60 overflow-y-auto">
                                                 ${clienteResults.map(c => html`
-                                                    <button key=${c.id} onClick=${() => { updateOs({ client: { omieClientId: c.id, name: c.name, document: c.document, email: c.email, phone: c.phone } }); setClienteResults([]); setClienteSearch(''); setSearchMsg(''); }} className="w-full text-left p-3 hover:bg-blue-50 transition">
+                                                    <button key=${c.id} onClick=${() => { updateOs({ client: { omieClientId: c.id, name: c.name, document: c.document, email: c.email, phone: c.phone } }); setClienteResults([]); setClienteSearch(''); setClienteMsg(''); }} className="w-full text-left p-3 hover:bg-blue-50 transition">
                                                         <div className="font-medium">${c.name}</div>
                                                         <div className="text-xs text-slate-500">${c.document || ''} ${c.email ? '| ' + c.email : ''}</div>
                                                     </button>
