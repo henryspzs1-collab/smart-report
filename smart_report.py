@@ -1255,6 +1255,25 @@ def os_delete(os_id):
     return jsonify({"success": True})
 
 
+@app.route('/api/os/<os_id>/debug', methods=['GET'])
+def os_debug(os_id):
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    drafts = _user_drafts(full_data, user)
+    draft = next((d for d in drafts if d['id'] == os_id), None)
+    if not draft:
+        return jsonify({"error": "draft not found", "available_ids": [d['id'] for d in drafts]}), 404
+    return jsonify({
+        "draft_id": draft.get('id'),
+        "omieOsId": draft.get('omieOsId'),
+        "omieOsId_type": type(draft.get('omieOsId')).__name__,
+        "omieOsNumber": draft.get('omieOsNumber'),
+        "status": draft.get('status'),
+        "is_update_calc": bool(draft.get('omieOsId'))
+    })
+
+
 @app.route('/api/os/<os_id>/anexar', methods=['POST'])
 def os_anexar(os_id):
     """Anexa um PDF (base64) à OS no Omie. PDF é zipado, base64-ado e enviado via IncluirAnexo."""
@@ -1459,14 +1478,17 @@ def os_send(os_id):
 
     cabecalho = {
         "nCodCli": cli['omieClientId'],
-        "cCodIntOS": draft['id'],
         "cCodParc": "000",
         "nQtdeParc": 1,
         "dDtPrevisao": datetime.utcnow().strftime("%d/%m/%Y"),
         "cEtapa": "10"
     }
     if is_update:
-        cabecalho["nCodOS"] = draft['omieOsId']
+        # Pra AlterarOS, manda nCodOS dentro do Cabecalho (identifica a OS no Omie)
+        cabecalho["nCodOS"] = int(draft['omieOsId'])
+    else:
+        # Pra IncluirOS, manda cCodIntOS como código de integração local
+        cabecalho["cCodIntOS"] = draft['id']
 
     param = {
         "Cabecalho": cabecalho,
@@ -1477,6 +1499,9 @@ def os_send(os_id):
         },
         "ServicosPrestados": itens
     }
+
+    # Log de debug pra próxima tentativa
+    print(f"[OS-SEND] is_update={is_update} call={'AlterarOS' if is_update else 'IncluirOS'} nCodOS={cabecalho.get('nCodOS')} cCodIntOS={cabecalho.get('cCodIntOS')}")
 
     # Adiciona peças como "produtosUtilizados" (saída de estoque)
     if draft.get('parts'):
