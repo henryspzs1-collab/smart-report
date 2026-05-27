@@ -5,6 +5,10 @@ import socket
 import re
 import secrets
 import string
+import io
+import zipfile
+import hashlib
+import base64
 from datetime import datetime
 from urllib import request as urlreq
 from urllib.error import HTTPError, URLError
@@ -903,6 +907,61 @@ def os_delete(os_id):
     return jsonify({"success": True})
 
 
+@app.route('/api/os/<os_id>/anexar', methods=['POST'])
+def os_anexar(os_id):
+    """Anexa um PDF (base64) à OS no Omie. PDF é zipado, base64-ado e enviado via IncluirAnexo."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    drafts = _user_drafts(full_data, user)
+    draft = next((d for d in drafts if d['id'] == os_id), None)
+    if not draft:
+        return jsonify({"error": "Rascunho não encontrado"}), 404
+    if draft.get('status') != 'sent' or not draft.get('omieOsId'):
+        return jsonify({"error": "OS precisa estar enviada ao Omie antes de anexar PDF."}), 400
+
+    body = request.json or {}
+    pdf_b64 = body.get('pdf_base64') or ''
+    filename = body.get('filename') or f"laudo_{os_id}.pdf"
+    # Remove prefixo data: caso venha como data URI
+    if ',' in pdf_b64 and pdf_b64.startswith('data:'):
+        pdf_b64 = pdf_b64.split(',', 1)[1]
+    if not pdf_b64:
+        return jsonify({"error": "PDF não fornecido"}), 400
+
+    try:
+        pdf_bytes = base64.b64decode(pdf_b64)
+    except Exception:
+        return jsonify({"error": "PDF base64 inválido"}), 400
+
+    md5_hash = hashlib.md5(pdf_bytes).hexdigest()
+
+    # Zipa o PDF (Omie exige zip + base64)
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(filename, pdf_bytes)
+    zip_b64 = base64.b64encode(zip_buf.getvalue()).decode('utf-8')
+
+    cod_int = f"anx_{os_id}_{int(datetime.utcnow().timestamp())}"[:20]
+
+    try:
+        omie_call('/geral/anexo/', 'IncluirAnexo', {
+            "cCodIntAnexo": cod_int,
+            "cTabela": "ordem-servico",
+            "nId": draft['omieOsId'],
+            "cNomeArquivo": filename,
+            "cTipoArquivo": "pdf",
+            "cArquivo": zip_b64,
+            "cMd5": md5_hash
+        })
+        draft['pdfAnexado'] = True
+        draft['pdfAnexadoAt'] = datetime.utcnow().isoformat() + "Z"
+        save_data(full_data)
+        return jsonify({"success": True})
+    except OmieError as e:
+        return jsonify({"error": str(e)}), e.status
+
+
 @app.route('/api/os/<os_id>/send', methods=['POST'])
 def os_send(os_id):
     user, full_data, err = _require_user()
@@ -1029,6 +1088,7 @@ HTML_PAGE = """
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/htm@3.1.1/dist/htm.js"></script>
     <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
 
     <style>
         @media print {
@@ -1352,6 +1412,70 @@ HTML_PAGE = """
                     headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
                     body: JSON.stringify(data)
                 }).then(r => r.json());
+            };
+
+            const anexarLaudoPDF = async () => {
+                if (!currentOs || currentOs.status !== 'sent') {
+                    alert('A OS precisa estar ENVIADA antes de anexar o PDF.');
+                    return;
+                }
+                if (typeof html2pdf === 'undefined') {
+                    alert('Biblioteca de PDF ainda carregando. Tente novamente em alguns segundos.');
+                    return;
+                }
+                // Pega o elemento da tela de impressão
+                const printEl = document.querySelector('.print\\:block');
+                if (!printEl) {
+                    alert('Não consegui encontrar o conteúdo do laudo. Vá na aba "Preencher Laudo" e volte.');
+                    return;
+                }
+                // Salva estilos originais e força visibilidade temporária pra capturar
+                const originalStyle = printEl.getAttribute('style') || '';
+                const originalClass = printEl.className;
+                printEl.style.cssText = 'display: block !important; position: fixed; left: -10000px; top: 0; width: 800px; background: white; color: black; padding: 20px; z-index: -1;';
+                printEl.className = originalClass.replace(/hidden/g, '');
+
+                try {
+                    const opt = {
+                        margin: 10,
+                        filename: `laudo_OS_${currentOs.omieOsNumber || currentOs.id}.pdf`,
+                        image: { type: 'jpeg', quality: 0.85 },
+                        html2canvas: { scale: 1.5, useCORS: true, logging: false },
+                        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+                    };
+                    const pdfBlob = await html2pdf().set(opt).from(printEl).outputPdf('blob');
+                    // Converte Blob -> base64
+                    const pdfB64 = await new Promise((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.onloadend = () => resolve(reader.result.split(',')[1]);
+                        reader.onerror = reject;
+                        reader.readAsDataURL(pdfBlob);
+                    });
+
+                    // Envia pro backend
+                    const resp = await fetch(`/api/os/${currentOs.id}/anexar`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                        body: JSON.stringify({
+                            pdf_base64: pdfB64,
+                            filename: opt.filename
+                        })
+                    });
+                    const data = await resp.json();
+                    if (data.success) {
+                        alert('PDF do laudo anexado à OS no Omie!');
+                        setCurrentOs(prev => ({ ...prev, pdfAnexado: true }));
+                        fetchOsDrafts();
+                    } else {
+                        alert('Erro ao anexar: ' + (data.error || 'desconhecido'));
+                    }
+                } catch (err) {
+                    alert('Erro ao gerar PDF: ' + (err.message || err));
+                } finally {
+                    // Reverte estilos
+                    printEl.setAttribute('style', originalStyle);
+                    printEl.className = originalClass;
+                }
             };
 
             const osTotal = (os) => {
@@ -2312,6 +2436,11 @@ HTML_PAGE = """
                                     ${!isLocked && html`
                                         <button onClick=${() => saveCurrentOs(false)} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded font-medium flex items-center gap-1"><i className="ph-bold ph-floppy-disk"></i> Salvar</button>
                                         <button onClick=${sendOsToOmie} disabled=${!omieStatus.ok} className=${`px-4 py-2 rounded font-medium flex items-center gap-1 text-white ${omieStatus.ok ? 'bg-green-600 hover:bg-green-700' : 'bg-slate-400 cursor-not-allowed'}`}><i className="ph-bold ph-paper-plane-tilt"></i> Enviar pro Omie</button>
+                                    `}
+                                    ${isLocked && currentOs.fromLaudo && html`
+                                        <button onClick=${anexarLaudoPDF} className=${`px-4 py-2 rounded font-medium flex items-center gap-1 text-white ${currentOs.pdfAnexado ? 'bg-slate-500 hover:bg-slate-600' : 'bg-purple-600 hover:bg-purple-700'}`}>
+                                            <i className="ph-bold ph-paperclip"></i> ${currentOs.pdfAnexado ? 'Re-anexar PDF do Laudo' : 'Anexar PDF do Laudo'}
+                                        </button>
                                     `}
                                 </div>
                             </div>
