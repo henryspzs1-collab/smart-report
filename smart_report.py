@@ -689,44 +689,22 @@ def omie_servicos():
                     })
                 except OmieNoRecords:
                     break
-                # A resposta também usa nomes camelCase para serviços
-                registros = data.get('cadastros') or data.get('servicoCadastro') or []
-
-                def _flat(v):
-                    """Converte qualquer valor pra string segura. Se for dict, pega o primeiro valor textual."""
-                    if v is None:
-                        return ''
-                    if isinstance(v, (str, int, float)):
-                        return str(v)
-                    if isinstance(v, dict):
-                        for vv in v.values():
-                            if isinstance(vv, (str, int, float)):
-                                return str(vv)
-                        return ''
-                    if isinstance(v, list):
-                        return ', '.join(_flat(x) for x in v if x)
-                    return str(v)
-
-                def _flat_num(v):
-                    try:
-                        return float(_flat(v) or 0)
-                    except (TypeError, ValueError):
-                        return 0.0
-
+                # Estrutura real do Omie /servicos/servico/:
+                # cadastros: [{ cabecalho: {cCodigo, cDescricao, nPrecoUnit}, intListar: {nCodServ}, ... }]
+                registros = data.get('cadastros') or []
                 for s in registros:
-                    intern = s.get('intItem', {}) or s.get('intCadastro', {}) or {}
-                    cab = s.get('cabecalho', {}) or s.get('cab', {}) or {}
-                    desc = _flat(cab.get('descricao') or intern.get('descricao_servico') or intern.get('descricao') or s.get('descricao') or '')
-                    code = _flat(cab.get('codigo') or intern.get('codigo') or s.get('codigo') or '')
-                    sid = (intern.get('nCodServ') or s.get('nCodServ') or s.get('codigo_servico'))
-                    price = _flat_num(cab.get('valor_unitario') or intern.get('valor_unitario') or s.get('valor_unitario') or 0)
+                    cab = s.get('cabecalho') or {}
+                    intl = s.get('intListar') or {}
+                    descbloco = s.get('descricao') or {}
                     all_items.append({
-                        "id": sid if isinstance(sid, (int, float, str)) else _flat(sid),
-                        "code": code,
-                        "description": desc,
-                        "unitPrice": price
+                        "id": intl.get('nCodServ'),
+                        "code": cab.get('cCodigo') or '',
+                        "description": (cab.get('cDescricao')
+                                        or descbloco.get('cDescrCompleta')
+                                        or ''),
+                        "unitPrice": float(cab.get('nPrecoUnit') or 0)
                     })
-                total_pages = data.get('total_de_paginas') or data.get('nTotPaginas') or 1
+                total_pages = data.get('nTotPaginas') or 1
                 if page >= total_pages:
                     break
                 page += 1
