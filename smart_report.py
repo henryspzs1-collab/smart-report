@@ -847,7 +847,9 @@ def os_importar_omie():
             "unitPrice": float(s.get('nValUnit') or 0),
             "cTribServ": s.get('cTribServ') or '01',
             "cCodServMun": s.get('cCodServMun') or '',
-            "cCodLC116": s.get('cCodServLC116') or ''
+            "cCodLC116": s.get('cCodServLC116') or '',
+            "nIdItem": s.get('nIdItem'),
+            "nSeqItem": s.get('nSeqItem')
         })
 
     parts = []
@@ -857,7 +859,8 @@ def os_importar_omie():
             "code": '',
             "description": '',
             "quantity": float(p.get('nQtdePU') or 1),
-            "unitPrice": 0
+            "unitPrice": 0,
+            "nIdItem": p.get('nIdItem')
         })
 
     now = datetime.utcnow().isoformat() + "Z"
@@ -1440,7 +1443,8 @@ def os_send(os_id):
         qty = float(s.get('quantity') or 1)
         price = float(s.get('unitPrice') or 0)
         desc = s.get('description') or ''
-        itens.append({
+        item = {
+            "nSeqItem": idx + 1,
             "nCodServico": s.get('omieServiceId'),
             "cDescServ": desc,
             "nQtde": qty,
@@ -1448,7 +1452,11 @@ def os_send(os_id):
             "cTribServ": s.get('cTribServ') or '01',
             "cCodServMun": s.get('cCodServMun') or '',
             "cCodServLC116": s.get('cCodLC116') or ''
-        })
+        }
+        # Preserva nIdItem original se o item veio da OS importada (Omie pode exigir)
+        if s.get('nIdItem'):
+            item["nIdItem"] = int(s['nIdItem'])
+        itens.append(item)
 
     # Pega cCodCateg do primeiro serviço (todos da OS compartilham essa categoria)
     primeiro_servico = draft.get('services', [{}])[0]
