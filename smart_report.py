@@ -582,6 +582,22 @@ def omie_debug_cc():
         return jsonify({"error": str(e)}), e.status
 
 
+@app.route('/api/omie/debug/listaros', methods=['GET'])
+def omie_debug_listaros():
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    try:
+        data = omie_call('/servicos/os/', 'ListarOS', {
+            "nPagina": 1,
+            "nRegPorPagina": 3,
+            "cExibirItensPedido": "S"
+        })
+        return jsonify(data)
+    except OmieError as e:
+        return jsonify({"error": str(e)}), e.status
+
+
 @app.route('/api/omie/os/abertas', methods=['GET'])
 def omie_os_abertas():
     """Lista OSes do Omie que ainda não foram faturadas/canceladas, pra técnico importar e editar."""
