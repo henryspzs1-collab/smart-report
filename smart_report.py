@@ -666,8 +666,24 @@ def omie_os_abertas():
             except Exception:
                 return datetime.min
         all_items.sort(key=_date_key, reverse=True)
+        all_items = all_items[:80]
 
-        return jsonify({"items": all_items[:80], "totalPaginas": total_paginas})
+        # Enriquece com nome do cliente (cache por cliente)
+        unique_cli_ids = list({i['nCodCli'] for i in all_items if i.get('nCodCli')})
+        for cli_id in unique_cli_ids:
+            ck = f"cli_name_{cli_id}"
+            if _cache_get(ck) is None:
+                try:
+                    cli_data = omie_call('/geral/clientes/', 'ConsultarCliente', {"codigo_cliente_omie": cli_id})
+                    nome = cli_data.get('razao_social') or cli_data.get('nome_fantasia') or ''
+                    _cache_set(ck, nome or '—')
+                except OmieError:
+                    _cache_set(ck, '—')
+        for i in all_items:
+            if i.get('nCodCli'):
+                i['clientName'] = _cache_get(f"cli_name_{i['nCodCli']}") or ''
+
+        return jsonify({"items": all_items, "totalPaginas": total_paginas})
     except OmieError as e:
         return jsonify({"error": str(e)}), e.status
 
@@ -1754,6 +1770,28 @@ HTML_PAGE = """
                 }).then(r => r.json());
             };
 
+            const irParaLaudoDesta = () => {
+                // Auto-preenche o cabeçalho do laudo com dados da OS atual
+                if (currentOs) {
+                    const patch = {};
+                    const clientField = headerConfig.find(f => f.id === 'client');
+                    const defectField = headerConfig.find(f => f.id === 'defect');
+                    if (clientField && currentOs.client?.name) {
+                        patch[clientField.id] = currentOs.client.name;
+                    }
+                    if (defectField && currentOs.observations) {
+                        // Só sobrescreve defect se estiver vazio (não atropela o que técnico já preencheu)
+                        if (!headerData[defectField.id]) {
+                            patch[defectField.id] = currentOs.observations;
+                        }
+                    }
+                    if (Object.keys(patch).length > 0) {
+                        setHeaderData(prev => ({ ...prev, ...patch }));
+                    }
+                }
+                setActiveTab('report');
+            };
+
             const fetchOmieAbertas = () => {
                 setLoadingAbertas(true);
                 fetch('/api/omie/os/abertas', { headers: { 'Authorization': auth.token } })
@@ -2346,6 +2384,18 @@ HTML_PAGE = """
 
                 return html`
                     <div className="space-y-8 animate-in fade-in duration-300">
+                        ${currentOs && (currentOs.status === 'imported' || currentOs.omieOsId) && html`
+                            <div className="bg-indigo-50 border-2 border-indigo-300 p-4 rounded-xl flex items-center gap-3">
+                                <i className="ph-fill ph-link text-indigo-600 text-2xl"></i>
+                                <div className="flex-1">
+                                    <div className="font-bold text-indigo-900">Laudo vinculado à OS #${currentOs.omieOsNumber || currentOs.id}</div>
+                                    <div className="text-xs text-indigo-700">Cliente: ${currentOs.client?.name || '—'} · Após preencher, volte na OS para anexar o PDF.</div>
+                                </div>
+                                <button onClick=${() => setActiveTab('os')} className="bg-white hover:bg-indigo-100 border border-indigo-300 text-indigo-700 px-3 py-1.5 rounded text-sm font-medium">
+                                    <i className="ph-bold ph-arrow-right"></i> Voltar pra OS
+                                </button>
+                            </div>
+                        `}
                         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                             <h2 className="text-xl font-semibold mb-4 text-slate-800 flex items-center gap-2">
                                 <i className="ph-fill ph-file-text text-blue-600 text-2xl"></i> Informações Gerais
@@ -2831,6 +2881,9 @@ HTML_PAGE = """
                                     </h2>
                                 </div>
                                 <div className="flex gap-2 flex-wrap">
+                                    <button onClick=${irParaLaudoDesta} className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-4 py-2 rounded font-medium flex items-center gap-1 border border-blue-200">
+                                        <i className="ph-bold ph-file-text"></i> Preencher Laudo desta OS
+                                    </button>
                                     ${!isLocked && html`
                                         <button onClick=${() => saveCurrentOs(false)} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded font-medium flex items-center gap-1"><i className="ph-bold ph-floppy-disk"></i> Salvar</button>
                                         <button onClick=${sendOsToOmie} disabled=${!omieStatus.ok} className=${`px-4 py-2 rounded font-medium flex items-center gap-1 text-white ${omieStatus.ok ? 'bg-green-600 hover:bg-green-700' : 'bg-slate-400 cursor-not-allowed'}`}>
@@ -3024,7 +3077,7 @@ HTML_PAGE = """
                                         <thead className="bg-amber-50 text-slate-700">
                                             <tr>
                                                 <th className="p-2 text-left">Nº OS</th>
-                                                <th className="p-2 text-left">Contato</th>
+                                                <th className="p-2 text-left">Cliente</th>
                                                 <th className="p-2 text-left">Etapa</th>
                                                 <th className="p-2 text-left">Inclusão</th>
                                                 <th className="p-2 text-right">Total</th>
@@ -3037,7 +3090,10 @@ HTML_PAGE = """
                                                 return html`
                                                 <tr key=${o.nCodOS} className="hover:bg-slate-50">
                                                     <td className="p-2 font-mono text-xs">${o.cNumOS || '—'}</td>
-                                                    <td className="p-2 text-xs">${o.cContato || '—'}</td>
+                                                    <td className="p-2 text-xs">
+                                                        <div className="font-medium text-slate-800">${o.clientName || '—'}</div>
+                                                        ${o.cContato && html`<div className="text-slate-500">contato: ${o.cContato}</div>`}
+                                                    </td>
                                                     <td className="p-2"><span className="bg-amber-100 text-amber-700 px-2 py-0.5 rounded text-xs font-bold">${o.cEtapa || '—'}</span></td>
                                                     <td className="p-2 text-xs">${o.dDtInc || ''}</td>
                                                     <td className="p-2 text-xs text-right">R$ ${parseFloat(o.nValorTotal || 0).toFixed(2)}</td>
