@@ -589,8 +589,9 @@ def omie_debug_listaros():
         return err
     try:
         data = omie_call('/servicos/os/', 'ListarOS', {
-            "nPagina": 1,
-            "nRegPorPagina": 3
+            "pagina": 1,
+            "registros_por_pagina": 3,
+            "apenas_importado_api": "N"
         })
         return jsonify(data)
     except OmieError as e:
@@ -610,8 +611,9 @@ def omie_os_abertas():
         while page <= max_pages:
             try:
                 data = omie_call('/servicos/os/', 'ListarOS', {
-                    "nPagina": page,
-                    "nRegPorPagina": 50
+                    "pagina": page,
+                    "registros_por_pagina": 50,
+                    "apenas_importado_api": "N"
                 })
             except OmieNoRecords:
                 break
