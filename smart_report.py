@@ -939,6 +939,25 @@ def os_send(os_id):
     primeiro_servico = draft.get('services', [{}])[0]
     cod_categ = primeiro_servico.get('cCodCateg') or '1.01.02'
 
+    # Pega primeira Conta Corrente do Omie (em cache)
+    nCodCC = _cache_get('default_cc')
+    if nCodCC is None:
+        try:
+            cc_data = omie_call('/geral/contacorrente/', 'ListarContasCorrentes', {
+                "pagina": 1,
+                "registros_por_pagina": 50,
+                "apenas_importado_api": "N"
+            })
+            contas = cc_data.get('ListarContasCorrentes') or cc_data.get('conta_corrente_cadastro') or []
+            if contas:
+                primeira = contas[0]
+                nCodCC = primeira.get('nCodCC') or primeira.get('codigo_conta')
+                _cache_set('default_cc', nCodCC)
+        except OmieError as e:
+            return jsonify({"error": f"Não foi possível obter Conta Corrente padrão do Omie: {e}"}), e.status
+    if not nCodCC:
+        return jsonify({"error": "Nenhuma Conta Corrente cadastrada no Omie. Cadastre uma e tente novamente."}), 400
+
     param = {
         "Cabecalho": {
             "nCodCli": cli['omieClientId'],
@@ -950,6 +969,7 @@ def os_send(os_id):
         },
         "InformacoesAdicionais": {
             "cCodCateg": cod_categ,
+            "nCodCC": nCodCC,
             "cDadosAdicNF": obs_combinada or "Ordem de Serviço gerada via Biodron Smart Report Pro"
         },
         "ServicosPrestados": itens
