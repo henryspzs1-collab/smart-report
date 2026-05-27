@@ -603,20 +603,26 @@ def omie_clientes():
     try:
         param = {
             "pagina": page,
-            "registros_por_pagina": 20,
+            "registros_por_pagina": 50,
             "apenas_importado_api": "N"
         }
-        if q:
-            # Omie aceita filtros via 'clientesFiltro'
+        # Se a busca contém wildcard %, faz busca ampla e filtra em memória.
+        # Senão, usa o filtro nativo do Omie pela razão social.
+        if q and '%' not in q:
             param["clientesFiltro"] = {"razao_social": q}
         data = omie_call('/geral/clientes/', 'ListarClientes', param)
         clientes = []
         for c in data.get('clientes_cadastro', []):
+            name = c.get('razao_social') or c.get('nome_fantasia') or ''
+            fantasia = c.get('nome_fantasia') or ''
+            if q and '%' in q:
+                if not (_matches_wildcard(name, q) or _matches_wildcard(fantasia, q)):
+                    continue
             clientes.append({
                 "id": c.get('codigo_cliente_omie'),
                 "code": c.get('codigo_cliente_integracao'),
-                "name": c.get('razao_social') or c.get('nome_fantasia'),
-                "fantasia": c.get('nome_fantasia'),
+                "name": name,
+                "fantasia": fantasia,
                 "document": c.get('cnpj_cpf'),
                 "email": c.get('email'),
                 "phone": c.get('telefone1_numero')
@@ -660,18 +666,36 @@ def omie_criar_cliente():
         return jsonify({"error": str(e)}), e.status
 
 
+def _norm_text(s):
+    """Lowercase + remove acentos."""
+    import unicodedata
+    s = unicodedata.normalize('NFD', (s or '').lower())
+    return ''.join(c for c in s if unicodedata.category(c) != 'Mn')
+
+
+def _matches_wildcard(text, query):
+    """Compara query (com '%' como wildcard) contra text. Cada parte separada por % deve aparecer em ordem."""
+    if not query:
+        return True
+    text_norm = _norm_text(text)
+    parts = [_norm_text(p) for p in query.split('%') if p.strip()]
+    if not parts:
+        return True
+    pos = 0
+    for p in parts:
+        idx = text_norm.find(p, pos)
+        if idx == -1:
+            return False
+        pos = idx + len(p)
+    return True
+
+
 @app.route('/api/omie/servicos', methods=['GET'])
 def omie_servicos():
     user, full_data, err = _require_user()
     if err:
         return err
-    q = (request.args.get('q') or '').strip().lower()
-    # Normaliza acentos pra comparação flexível
-    import unicodedata
-    def _norm(s):
-        s = unicodedata.normalize('NFD', (s or '').lower())
-        return ''.join(c for c in s if unicodedata.category(c) != 'Mn')
-    q_norm = _norm(q)
+    q = (request.args.get('q') or '').strip()
 
     try:
         # Pega catálogo COMPLETO do cache (uma vez a cada 5 min), filtra em memória
@@ -714,9 +738,9 @@ def omie_servicos():
                 page += 1
             _cache_set(cache_key, all_items)
 
-        # Filtra em memória
-        if q_norm:
-            filtered = [s for s in all_items if q_norm in _norm(s['description']) or q_norm in _norm(s['code'] or '')]
+        # Filtra em memória usando wildcard (%) na busca
+        if q:
+            filtered = [s for s in all_items if _matches_wildcard(s['description'], q) or _matches_wildcard(s['code'] or '', q)]
         else:
             filtered = all_items
         return jsonify({
@@ -733,12 +757,7 @@ def omie_produtos():
     user, full_data, err = _require_user()
     if err:
         return err
-    q = (request.args.get('q') or '').strip().lower()
-    import unicodedata
-    def _norm(s):
-        s = unicodedata.normalize('NFD', (s or '').lower())
-        return ''.join(c for c in s if unicodedata.category(c) != 'Mn')
-    q_norm = _norm(q)
+    q = (request.args.get('q') or '').strip()
 
     try:
         cache_key = "produtos_full"
@@ -772,8 +791,8 @@ def omie_produtos():
                 page += 1
             _cache_set(cache_key, all_items)
 
-        if q_norm:
-            filtered = [p for p in all_items if q_norm in _norm(p['description']) or q_norm in _norm(p['code'] or '')]
+        if q:
+            filtered = [p for p in all_items if _matches_wildcard(p['description'], q) or _matches_wildcard(p['code'] or '', q)]
         else:
             filtered = all_items
         return jsonify({
@@ -905,9 +924,6 @@ def os_send(os_id):
         qty = float(s.get('quantity') or 1)
         price = float(s.get('unitPrice') or 0)
         desc = s.get('description') or ''
-        # No primeiro serviço, anexa observações + peças
-        if idx == 0 and obs_combinada:
-            desc = (desc + "\n\n" + obs_combinada).strip()
         itens.append({
             "nCodServico": s.get('omieServiceId'),
             "cDescServ": desc,
@@ -926,6 +942,9 @@ def os_send(os_id):
             "nQtdeParc": 1,
             "dDtPrevisao": datetime.utcnow().strftime("%d/%m/%Y"),
             "cEtapa": "10"
+        },
+        "InformacoesAdicionais": {
+            "cDadosAdicNF": obs_combinada or "Ordem de Serviço gerada via Biodron Smart Report Pro"
         },
         "ServicosPrestados": itens
     }
@@ -2267,7 +2286,7 @@ HTML_PAGE = """
                                 ` : html`
                                     <div className="space-y-3">
                                         <div className="flex gap-2">
-                                            <input type="text" placeholder="Buscar cliente no Omie por nome/razão social..." value=${clienteSearch} onChange=${(e) => setClienteSearch(e.target.value)} className="flex-1 p-2 border border-slate-300 rounded outline-none focus:ring-2 focus:ring-blue-500" />
+                                            <input type="text" placeholder="Buscar cliente (use % como atalho, ex: bio%agro)..." value=${clienteSearch} onChange=${(e) => setClienteSearch(e.target.value)} className="flex-1 p-2 border border-slate-300 rounded outline-none focus:ring-2 focus:ring-blue-500" />
                                             <button onClick=${() => searchClientes(clienteSearch)} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded font-medium"><i className="ph-bold ph-magnifying-glass"></i></button>
                                             <button onClick=${() => setShowNewClienteModal(true)} className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded font-medium" title="Cadastrar novo cliente no Omie"><i className="ph-bold ph-plus"></i></button>
                                         </div>
@@ -2303,7 +2322,7 @@ HTML_PAGE = """
                                                 <div className="flex gap-2 items-start">
                                                     <div className="flex-1 space-y-2">
                                                         <div className="flex gap-2">
-                                                            <input type="text" placeholder="Buscar serviço no Omie..." value=${servicoSearch.forIndex === i ? servicoSearch.q : (s.description || '')} onChange=${(e) => setServicoSearch({ q: e.target.value, forIndex: i })} className="flex-1 p-2 border border-slate-300 rounded text-sm" disabled=${isLocked} />
+                                                            <input type="text" placeholder="Buscar serviço (use % como atalho, ex: man%bat%t40)..." value=${servicoSearch.forIndex === i ? servicoSearch.q : (s.description || '')} onChange=${(e) => setServicoSearch({ q: e.target.value, forIndex: i })} className="flex-1 p-2 border border-slate-300 rounded text-sm" disabled=${isLocked} />
                                                             ${!isLocked && html`<button onClick=${() => searchServicos(servicoSearch.forIndex === i ? servicoSearch.q : (s.description || ''))} className="bg-blue-600 text-white px-3 rounded text-sm"><i className="ph-bold ph-magnifying-glass"></i></button>`}
                                                         </div>
                                                         ${servicoSearch.forIndex === i && servicoMsg && html`<div className="text-xs text-slate-600 italic">${servicoMsg}</div>`}
@@ -2348,7 +2367,7 @@ HTML_PAGE = """
                                                 <div className="flex gap-2 items-start">
                                                     <div className="flex-1 space-y-2">
                                                         <div className="flex gap-2">
-                                                            <input type="text" placeholder="Buscar peça no Omie..." value=${produtoSearch.forIndex === i ? produtoSearch.q : (p.description || '')} onChange=${(e) => setProdutoSearch({ q: e.target.value, forIndex: i })} className="flex-1 p-2 border border-slate-300 rounded text-sm" disabled=${isLocked} />
+                                                            <input type="text" placeholder="Buscar peça (use % como atalho, ex: placa%princ%t40)..." value=${produtoSearch.forIndex === i ? produtoSearch.q : (p.description || '')} onChange=${(e) => setProdutoSearch({ q: e.target.value, forIndex: i })} className="flex-1 p-2 border border-slate-300 rounded text-sm" disabled=${isLocked} />
                                                             ${!isLocked && html`<button onClick=${() => searchProdutos(produtoSearch.forIndex === i ? produtoSearch.q : (p.description || ''))} className="bg-blue-600 text-white px-3 rounded text-sm"><i className="ph-bold ph-magnifying-glass"></i></button>`}
                                                         </div>
                                                         ${produtoSearch.forIndex === i && produtoMsg && html`<div className="text-xs text-slate-600 italic">${produtoMsg}</div>`}
