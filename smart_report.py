@@ -955,7 +955,7 @@ def os_send(os_id):
     primeiro_servico = draft.get('services', [{}])[0]
     cod_categ = primeiro_servico.get('cCodCateg') or '1.01.02'
 
-    # Pega primeira Conta Corrente do Omie (em cache)
+    # Pega Conta Corrente ATIVA do Omie (em cache). Prioriza tipo CC sobre CX/Cartao.
     nCodCC = _cache_get('default_cc')
     if nCodCC is None:
         try:
@@ -964,15 +964,19 @@ def os_send(os_id):
                 "registros_por_pagina": 50,
                 "apenas_importado_api": "N"
             })
-            contas = cc_data.get('ListarContasCorrentes') or cc_data.get('conta_corrente_cadastro') or []
-            if contas:
-                primeira = contas[0]
-                nCodCC = primeira.get('nCodCC') or primeira.get('codigo_conta')
+            contas = cc_data.get('ListarContasCorrentes') or []
+            # Filtra apenas ativas
+            ativas = [c for c in contas if (c.get('inativo') or 'N').upper() != 'S']
+            # Prefere tipo CC (Conta Corrente) sobre CX (Caixa) e outros
+            preferidas = [c for c in ativas if (c.get('tipo') or '').upper() == 'CC']
+            escolhida = (preferidas[0] if preferidas else (ativas[0] if ativas else None))
+            if escolhida:
+                nCodCC = escolhida.get('nCodCC')
                 _cache_set('default_cc', nCodCC)
         except OmieError as e:
             return jsonify({"error": f"Não foi possível obter Conta Corrente padrão do Omie: {e}"}), e.status
     if not nCodCC:
-        return jsonify({"error": "Nenhuma Conta Corrente cadastrada no Omie. Cadastre uma e tente novamente."}), 400
+        return jsonify({"error": "Nenhuma Conta Corrente ativa encontrada no Omie. Verifique o cadastro."}), 400
 
     param = {
         "Cabecalho": {
