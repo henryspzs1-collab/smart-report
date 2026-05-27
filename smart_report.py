@@ -879,32 +879,39 @@ def os_send(os_id):
     if not cli.get('omieClientId'):
         return jsonify({"error": "Selecione (ou cadastre) o cliente no Omie antes de enviar."}), 400
 
-    # Monta payload da OS para Omie
+    # Monta payload da OS para Omie. Junta observações + peças na descrição do serviço.
+    obs_text = (draft.get('observations') or '').strip()
+    parts_text = ''
+    if draft.get('parts'):
+        for p in draft.get('parts', []):
+            if not p.get('omieProductId'):
+                return jsonify({"error": f"Peça '{p.get('description','')}' não está vinculada ao catálogo Omie."}), 400
+        parts_lines = [
+            f"- {p['description']} (qtd {p['quantity']} x R$ {float(p.get('unitPrice') or 0):.2f})"
+            for p in draft.get('parts', [])
+        ]
+        parts_text = "Peças utilizadas:\n" + "\n".join(parts_lines)
+
+    obs_combinada = "\n\n".join([t for t in [obs_text, parts_text] if t])
+
     itens = []
-    for s in draft.get('services', []):
+    for idx, s in enumerate(draft.get('services', [])):
         if not s.get('omieServiceId'):
             return jsonify({"error": f"Serviço '{s.get('description','')}' não está vinculado ao catálogo Omie."}), 400
         qty = float(s.get('quantity') or 1)
         price = float(s.get('unitPrice') or 0)
+        desc = s.get('description') or ''
+        # No primeiro serviço, anexa observações + peças
+        if idx == 0 and obs_combinada:
+            desc = (desc + "\n\n" + obs_combinada).strip()
         itens.append({
-            "ide": {"codigo_servico_integracao": f"srv_{s.get('omieServiceId')}_{int(datetime.utcnow().timestamp())}"},
+            "ide": {"codigo_servico_integracao": f"srv_{s.get('omieServiceId')}_{int(datetime.utcnow().timestamp())}_{idx}"},
             "servico_prestado": {
                 "codigo_servico": s.get('omieServiceId'),
-                "descricao_servico": s.get('description') or '',
+                "descricao_servico": desc,
                 "quantidade": qty,
                 "valor_unitario": price
             }
-        })
-
-    detalhes_produto = []
-    for p in draft.get('parts', []):
-        if not p.get('omieProductId'):
-            return jsonify({"error": f"Peça '{p.get('description','')}' não está vinculada ao catálogo Omie."}), 400
-        detalhes_produto.append({
-            "codigo_produto": p.get('omieProductId'),
-            "descricao": p.get('description') or '',
-            "quantidade": float(p.get('quantity') or 1),
-            "valor_unitario": float(p.get('unitPrice') or 0)
         })
 
     param = {
@@ -914,20 +921,8 @@ def os_send(os_id):
             "dDtPrevisao": datetime.utcnow().strftime("%d/%m/%Y"),
             "cEtapa": "10"
         },
-        "InformacoesAdicionais": {
-            "cDadosAdicionais": draft.get('observations') or ''
-        },
         "ServicosPrestados": itens
     }
-    if detalhes_produto:
-        param["Departamentos"] = []  # placeholder caso Omie peça
-        # Produtos consumidos em OS dependem da config Omie; muitas vezes vão num Pedido de Venda à parte.
-        # Por enquanto incluímos nas observações como referência.
-        obs_extra = "\n\nPeças utilizadas:\n" + "\n".join(
-            f"- {p['description']} (qtd {p['quantity']} x R$ {p['unitPrice']:.2f})"
-            for p in draft.get('parts', [])
-        )
-        param["InformacoesAdicionais"]["cDadosAdicionais"] = (param["InformacoesAdicionais"]["cDadosAdicionais"] + obs_extra).strip()
 
     try:
         result = omie_call('/servicos/os/', 'IncluirOS', param)
