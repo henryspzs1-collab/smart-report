@@ -919,20 +919,13 @@ def os_send(os_id):
     if not cli.get('omieClientId'):
         return jsonify({"error": "Selecione (ou cadastre) o cliente no Omie antes de enviar."}), 400
 
-    # Monta payload da OS para Omie. Junta observações + peças na descrição do serviço.
-    obs_text = (draft.get('observations') or '').strip()
-    parts_text = ''
-    if draft.get('parts'):
-        for p in draft.get('parts', []):
-            if not p.get('omieProductId'):
-                return jsonify({"error": f"Peça '{p.get('description','')}' não está vinculada ao catálogo Omie."}), 400
-        parts_lines = [
-            f"- {p['description']} (qtd {p['quantity']} x R$ {float(p.get('unitPrice') or 0):.2f})"
-            for p in draft.get('parts', [])
-        ]
-        parts_text = "Peças utilizadas:\n" + "\n".join(parts_lines)
+    # Valida que todas as peças têm vínculo Omie
+    for p in draft.get('parts', []):
+        if not p.get('omieProductId'):
+            return jsonify({"error": f"Peça '{p.get('description','')}' não está vinculada ao catálogo Omie."}), 400
 
-    obs_combinada = "\n\n".join([t for t in [obs_text, parts_text] if t])
+    # Observações puras (sem mais "Peças utilizadas:" embutido — agora vão pro produtosUtilizados)
+    obs_combinada = (draft.get('observations') or '').strip()
 
     itens = []
     for idx, s in enumerate(draft.get('services', [])):
@@ -994,6 +987,19 @@ def os_send(os_id):
         },
         "ServicosPrestados": itens
     }
+
+    # Adiciona peças como "produtosUtilizados" (saída de estoque)
+    if draft.get('parts'):
+        produtos_utilizados = []
+        for p in draft.get('parts', []):
+            produtos_utilizados.append({
+                "nCodProdutoPU": p.get('omieProductId'),
+                "nQtdePU": float(p.get('quantity') or 1)
+            })
+        param["produtosUtilizados"] = {
+            "cAcaoProdUtilizados": "EST",
+            "produtoUtilizado": produtos_utilizados
+        }
 
     try:
         result = omie_call('/servicos/os/', 'IncluirOS', param)
