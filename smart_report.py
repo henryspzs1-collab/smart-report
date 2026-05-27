@@ -1727,10 +1727,10 @@ HTML_PAGE = """
             useEffect(() => {
                 if (auth && activeTab === 'os') {
                     fetchOsDrafts();
-                    checkOmieStatus();
-                    fetchOmieAbertas();
+                    if (!omieStatus.checked) checkOmieStatus();
+                    if (!currentOs) fetchOmieAbertas();
                 }
-            }, [activeTab, auth]);
+            }, [activeTab, auth, currentOs]);
 
             // ---- helpers OS ----
             const createNewOs = (prefill = {}) => {
@@ -2987,7 +2987,7 @@ HTML_PAGE = """
                                     </button>
                                     ${!isLocked && html`
                                         <button onClick=${() => saveCurrentOs(false)} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded font-medium flex items-center gap-1"><i className="ph-bold ph-floppy-disk"></i> Salvar</button>
-                                        <button onClick=${sendOsToOmie} disabled=${!omieStatus.ok} className=${`px-4 py-2 rounded font-medium flex items-center gap-1 text-white ${omieStatus.ok ? 'bg-green-600 hover:bg-green-700' : 'bg-slate-400 cursor-not-allowed'}`}>
+                                        <button onClick=${sendOsToOmie} disabled=${omieStatus.checked && !omieStatus.ok} className=${`px-4 py-2 rounded font-medium flex items-center gap-1 text-white ${(omieStatus.checked && !omieStatus.ok) ? 'bg-slate-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'}`}>
                                             <i className="ph-bold ph-paper-plane-tilt"></i> ${currentOs.status === 'imported' ? 'Atualizar OS no Omie' : 'Enviar pro Omie'}
                                         </button>
                                     `}
