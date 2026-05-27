@@ -590,8 +590,7 @@ def omie_debug_listaros():
     try:
         data = omie_call('/servicos/os/', 'ListarOS', {
             "nPagina": 1,
-            "nRegPorPagina": 3,
-            "cExibirItensPedido": "S"
+            "nRegPorPagina": 3
         })
         return jsonify(data)
     except OmieError as e:
@@ -612,8 +611,7 @@ def omie_os_abertas():
             try:
                 data = omie_call('/servicos/os/', 'ListarOS', {
                     "nPagina": page,
-                    "nRegPorPagina": 50,
-                    "cExibirItensPedido": "N"
+                    "nRegPorPagina": 50
                 })
             except OmieNoRecords:
                 break
