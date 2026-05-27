@@ -1759,14 +1759,34 @@ HTML_PAGE = """
                         observations: currentOs.observations,
                         fromLaudo: currentOs.fromLaudo
                     })
-                }).then(r => r.json()).then(d => {
+                }).then(r => r.json().then(d => ({ status: r.status, d }))).then(({ status, d }) => {
                     if (d && d.id) {
                         setCurrentOs(d);
                         fetchOsDrafts();
                         if (!silent) alert('Rascunho salvo!');
+                        return d;
+                    } else if (status === 404 && currentOs.omieOsId) {
+                        // Draft sumiu desse usuário mas a OS Omie existe - re-importa automaticamente
+                        if (!silent) alert('Rascunho não estava salvo nesta conta. Re-importando do Omie...');
+                        return fetch('/api/os/importar-omie', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                            body: JSON.stringify({ nCodOS: currentOs.omieOsId })
+                        }).then(r => r.json()).then(re => {
+                            if (re.id) {
+                                // Mantém os dados editados pelo usuário em memória, mas atualiza o id local pra match no backend
+                                const merged = { ...currentOs, id: re.id, status: 'imported', omieOsId: re.omieOsId, omieOsNumber: re.omieOsNumber };
+                                setCurrentOs(merged);
+                                fetchOsDrafts();
+                                return merged;
+                            }
+                            return null;
+                        });
                     } else if (d.error) {
                         alert(d.error);
+                        return null;
                     }
+                    return null;
                 });
             };
 
@@ -2087,6 +2107,14 @@ HTML_PAGE = """
                 setAuth(null);
                 setIsLoaded(false);
                 setActiveTab('report');
+                // Limpa estados específicos do usuário pra não vazar pra próxima conta
+                setCurrentOs(null);
+                setOsDrafts([]);
+                setOmieAbertas([]);
+                setHeaderData({});
+                setAnswers({});
+                setDiagramMarks({});
+                setReportImages([]);
             };
 
             if (!auth) {
