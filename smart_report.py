@@ -1380,14 +1380,23 @@ def _gerar_pdf_laudo(payload):
     # ---- Checklist ----
     if questions:
         story.append(Paragraph('RESULTADOS DA INSPEÇÃO FÍSICA', h2))
-        rows = [[Paragraph('<b>Item Avaliado</b>', body), Paragraph('<b>Situação</b>', body)]]
+        item_label = ParagraphStyle('item_label', parent=body, fontSize=9, leading=11, leftIndent=0, spaceAfter=2, fontName='Helvetica-Bold')
+        item_status_ok = ParagraphStyle('item_ok', parent=body, fontSize=8, leading=10, leftIndent=12, textColor=colors.HexColor('#6b7280'), spaceAfter=6)
+        item_status_anormal = ParagraphStyle('item_anormal', parent=body, fontSize=9, leading=11, leftIndent=12, textColor=colors.black, spaceAfter=6)
+
+        def _esc(s):
+            return (str(s) if s is not None else '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br/>')
+
         for q in questions:
             ans = answers.get(q.get('id'), {}) or {}
             checked = ans.get('checked')
             qtype = q.get('type', 'checkbox')
+            anormal = False
             if qtype == 'text':
                 status = ans.get('text') or '-'
+                anormal = bool(ans.get('text'))
             elif checked:
+                anormal = True
                 if qtype == 'checkbox_qty':
                     status = f"{ans.get('qty', '-')} unid."
                 elif qtype == 'checkbox_text':
@@ -1396,16 +1405,12 @@ def _gerar_pdf_laudo(payload):
                     status = 'Constatado'
             else:
                 status = 'Não Constatado'
-            rows.append([Paragraph(q.get('label', ''), body), Paragraph(str(status), body)])
-        ck_table = Table(rows, colWidths=[130*mm, 50*mm])
-        ck_table.setStyle(TableStyle([
-            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#cbd5e1')),
-            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#e5e7eb')),
-            ('VALIGN', (0,0), (-1,-1), 'TOP'),
-            ('PADDING', (0,0), (-1,-1), 3),
-            ('ALIGN', (1,1), (1,-1), 'CENTER'),
-        ]))
-        story.append(ck_table)
+
+            # Cada item é um Paragraph separado — ReportLab divide entre páginas automaticamente
+            marker = '⚠' if anormal else '✓'
+            story.append(Paragraph(f"{marker} {_esc(q.get('label',''))}", item_label))
+            style = item_status_anormal if anormal else item_status_ok
+            story.append(Paragraph(_esc(status), style))
         story.append(Spacer(1, 4*mm))
 
     # ---- Diagramas com marcações ----
