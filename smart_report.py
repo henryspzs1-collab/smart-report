@@ -1375,6 +1375,94 @@ def os_debug(os_id):
     })
 
 
+@app.route('/api/gerar-texto-ia', methods=['POST'])
+def gerar_texto_ia():
+    """Usa o Gemini pra elaborar um texto técnico do laudo a partir dos defeitos encontrados."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+
+    api_key = os.environ.get('GEMINI_API_KEY')
+    if not api_key:
+        return jsonify({"error": "GEMINI_API_KEY não configurada no servidor."}), 503
+
+    body = request.json or {}
+    header_data = body.get('headerData', {})
+    header_config = body.get('headerConfig', [])
+    answers = body.get('answers', {})
+    questions = body.get('questions', [])
+    cell_summary = body.get('cellSummary')  # texto pronto do resumo de células (opcional)
+    model_name = body.get('modelName', '')
+
+    # Monta a lista de achados
+    achados = []
+    for q in questions:
+        ans = answers.get(q.get('id'), {}) or {}
+        checked = ans.get('checked')
+        qtype = q.get('type', 'checkbox')
+        if qtype == 'text':
+            if ans.get('text'):
+                achados.append(f"- {q.get('label')}: {ans.get('text')}")
+        elif checked:
+            if qtype == 'checkbox_qty':
+                achados.append(f"- {q.get('label')}: {ans.get('qty','?')} unidade(s)")
+            elif qtype == 'checkbox_text':
+                achados.append(f"- {q.get('label')}: {ans.get('text','constatado')}")
+            else:
+                achados.append(f"- {q.get('label')}: constatado")
+
+    # Dados gerais
+    info_lines = []
+    for f in header_config:
+        val = header_data.get(f.get('id', ''), '')
+        if val:
+            info_lines.append(f"{f.get('label')}: {val}")
+
+    achados_txt = "\n".join(achados) if achados else "Nenhum defeito assinalado no checklist."
+    info_txt = "\n".join(info_lines) if info_lines else "Não informado."
+    cell_txt = f"\n\nAnálise de células:\n{cell_summary}" if cell_summary else ""
+
+    prompt = f"""Você é um técnico especialista em manutenção de baterias de drones agrícolas (DJI Agras).
+Elabore um texto técnico profissional e objetivo para um laudo de inspeção, em português do Brasil,
+descrevendo o estado da bateria com base nos achados abaixo. O texto deve ser claro, formal e adequado
+para incluir em uma proposta comercial ao cliente. Não invente defeitos que não foram listados.
+Organize em parágrafos: 1) introdução breve, 2) defeitos/condições encontradas, 3) conclusão e recomendação.
+
+MODELO DA BATERIA: {model_name}
+
+DADOS GERAIS:
+{info_txt}
+
+ACHADOS DA INSPEÇÃO:
+{achados_txt}{cell_txt}
+
+Escreva apenas o texto do laudo, sem títulos markdown, pronto para copiar e colar."""
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+    req_body = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 1200}
+    }).encode('utf-8')
+
+    req = urlreq.Request(url, data=req_body, headers={'Content-Type': 'application/json'})
+    try:
+        with urlreq.urlopen(req, timeout=40) as resp:
+            raw = resp.read().decode('utf-8')
+        data = json.loads(raw)
+        texto = data['candidates'][0]['content']['parts'][0]['text'].strip()
+        return jsonify({"success": True, "texto": texto})
+    except HTTPError as e:
+        try:
+            errbody = e.read().decode('utf-8')
+        except Exception:
+            errbody = str(e)
+        return jsonify({"error": f"Gemini HTTP {e.code}: {errbody[:300]}"}), 502
+    except (KeyError, IndexError):
+        return jsonify({"error": "Resposta do Gemini sem texto (pode ter sido bloqueada por segurança)."}), 502
+    except URLError as e:
+        return jsonify({"error": f"Falha de conexão com Gemini: {e.reason}"}), 502
+
+
 def _gerar_pdf_laudo(payload):
     """Gera PDF do laudo a partir do payload do frontend usando ReportLab."""
     from reportlab.lib.pagesizes import A4
@@ -1677,22 +1765,16 @@ def _gerar_pdf_laudo(payload):
             t.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP'), ('PADDING', (0,0), (-1,-1), 4)]))
             story.append(t)
 
-    # ---- Assinaturas ----
+    # ---- Assinatura do Técnico (somente) ----
     if show_signatures:
         story.append(Spacer(1, 15*mm))
-        sig_cells = [[], []]
+        rows = []
         if technician_signature:
             sig_img = _img_from_data_uri(technician_signature, max_w=60*mm, max_h=20*mm)
             if sig_img:
-                sig_cells[0].append(sig_img)
-        sig_cells[0].append(Paragraph('_________________________<br/><b>Técnico Responsável</b>', body))
-        sig_cells[1].append(Spacer(1, 22*mm) if technician_signature else '')
-        sig_cells[1].append(Paragraph('_________________________<br/><b>Ciente do Cliente</b>', body))
-
-        sig_table = Table([
-            [sig_cells[0][0] if technician_signature else '', sig_cells[1][0] if sig_cells[1] and technician_signature else ''],
-            [sig_cells[0][-1], sig_cells[1][-1]]
-        ], colWidths=[90*mm, 90*mm])
+                rows.append([sig_img])
+        rows.append([Paragraph('_________________________<br/><b>Técnico Responsável</b>', body)])
+        sig_table = Table(rows, colWidths=[90*mm])
         sig_table.setStyle(TableStyle([
             ('ALIGN', (0,0), (-1,-1), 'CENTER'),
             ('VALIGN', (0,0), (-1,-1), 'BOTTOM'),
@@ -2142,6 +2224,9 @@ HTML_PAGE = """
             const [cellVoltages, setCellVoltages] = useState({}); // { modelId: ["3.85", "3.86", ...] }
             const [laudosList, setLaudosList] = useState([]);
             const [laudosModalOpen, setLaudosModalOpen] = useState(false);
+            const [iaModalOpen, setIaModalOpen] = useState(false);
+            const [iaTexto, setIaTexto] = useState('');
+            const [iaLoading, setIaLoading] = useState(false);
 
             // Estados UI para Modais e Imagens
             const [sourceModalOpen, setSourceModalOpen] = useState(false);
@@ -2925,6 +3010,54 @@ HTML_PAGE = """
                     } catch (err) { alert('Arquivo inválido: ' + err.message); }
                 };
                 reader.readAsText(file);
+            };
+
+            // ---- Geração de texto com IA (Gemini) ----
+            const gerarTextoIA = async () => {
+                const selectedModel = models.find(m => m.id === headerData.selectedTemplateId);
+                setIaModalOpen(true);
+                setIaLoading(true);
+                setIaTexto('');
+
+                // Monta resumo de células se houver
+                let cellSummary = null;
+                if (selectedModel && selectedModel.cellAnalysis && selectedModel.cellAnalysis.enabled) {
+                    const volts = (cellVoltages[selectedModel.id] || []).map(v => parseFloat(v)).filter(v => !isNaN(v) && v > 0);
+                    if (volts.length) {
+                        const total = volts.reduce((s,v)=>s+v,0);
+                        const maxV = Math.max(...volts), minV = Math.min(...volts);
+                        const drop = maxV - minV;
+                        const maxDrop = selectedModel.cellAnalysis.maxDropV || 0.2;
+                        cellSummary = `${volts.length} células medidas. Tensão total ${total.toFixed(3)}V, máxima ${maxV.toFixed(3)}V, mínima ${minV.toFixed(3)}V, voltage drop ${drop.toFixed(3)}V (limite tolerado ${maxDrop.toFixed(3)}V). ${drop > maxDrop ? 'Células desbalanceadas acima do limite.' : 'Células dentro do limite de balanceamento.'}`;
+                    }
+                }
+
+                try {
+                    const resp = await fetch('/api/gerar-texto-ia', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                        body: JSON.stringify({
+                            headerData, headerConfig, answers,
+                            questions: selectedModel ? selectedModel.questions : [],
+                            modelName: selectedModel ? selectedModel.name : '',
+                            cellSummary
+                        })
+                    });
+                    const data = await resp.json();
+                    if (data.success) {
+                        setIaTexto(data.texto);
+                    } else {
+                        setIaTexto('❌ Erro: ' + (data.error || 'desconhecido'));
+                    }
+                } catch (err) {
+                    setIaTexto('❌ Erro de conexão: ' + (err.message || err));
+                } finally {
+                    setIaLoading(false);
+                }
+            };
+
+            const copiarTextoIA = () => {
+                navigator.clipboard?.writeText(iaTexto).then(() => alert('Texto copiado!'));
             };
 
             // ---- Download fotos como ZIP ----
@@ -4217,14 +4350,13 @@ HTML_PAGE = """
                         `}
 
                         ${headerData.showSignatures !== false && html`
-                            <div className="mt-16 flex justify-between px-10 prevent-break">
+                            <div className="mt-16 flex justify-center px-10 prevent-break">
                                 <div className="text-center w-64 relative">
                                     ${headerData.technicianSignature && html`
                                         <img src=${headerData.technicianSignature} alt="Assinatura" style=${{ height: '60px', objectFit: 'contain', margin: '0 auto', display: 'block', marginBottom: '-10px' }} />
                                     `}
                                     <div className="border-t border-black pt-2 font-semibold">Técnico Responsável</div>
                                 </div>
-                                <div className="text-center w-64 border-t border-black pt-2 font-semibold mt-12">Ciente do Cliente</div>
                             </div>
                         `}
                     </div>
@@ -4244,6 +4376,7 @@ HTML_PAGE = """
                                 </span>
                             </div>
                             <div className="flex gap-2 flex-wrap">
+                                <button onClick=${gerarTextoIA} className="px-3 py-2 bg-gradient-to-r from-purple-600 to-fuchsia-600 rounded-lg text-sm font-medium hover:from-purple-500 hover:to-fuchsia-500 transition flex items-center gap-1 shadow-md"><i className="ph-bold ph-sparkle"></i> Laudo IA</button>
                                 <button onClick=${() => setLaudosModalOpen(true)} className="px-3 py-2 bg-slate-700 rounded-lg text-sm font-medium hover:bg-slate-600 transition flex items-center gap-1"><i className="ph-bold ph-archive"></i> Laudos</button>
                                 <button onClick=${downloadImagesZip} className="px-3 py-2 bg-slate-700 rounded-lg text-sm font-medium hover:bg-slate-600 transition flex items-center gap-1" title="Baixar fotos do laudo atual em ZIP"><i className="ph-bold ph-download-simple"></i> Fotos ZIP</button>
                                 <button onClick=${clearCurrentReport} className="px-3 py-2 bg-slate-800 rounded-lg text-sm font-medium hover:bg-slate-700 transition">Limpar</button>
@@ -4282,6 +4415,35 @@ HTML_PAGE = """
                                     <button onClick=${() => galleryInputRef.current.click()} className="w-full flex items-center justify-center gap-3 bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 p-4 rounded-xl font-medium transition"><i className="ph-fill ph-image text-2xl"></i> Importar da Galeria</button>
                                     <button onClick=${() => setSourceModalOpen(false)} className="w-full mt-2 p-3 text-red-500 font-medium hover:bg-red-50 rounded-xl transition">Cancelar</button>
                                 </div>
+                            </div>
+                        </div>
+                    `}
+
+                    ${iaModalOpen && html`
+                        <div className="print:hidden fixed inset-0 bg-slate-900/70 z-[70] flex items-end md:items-center justify-center p-4">
+                            <div className="bg-white rounded-t-2xl md:rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+                                <div className="p-4 bg-gradient-to-r from-purple-600 to-fuchsia-600 text-white flex items-center justify-between rounded-t-2xl md:rounded-t-xl">
+                                    <h3 className="font-bold text-lg flex items-center gap-2"><i className="ph-fill ph-sparkle"></i> Laudo elaborado por IA</h3>
+                                    <button onClick=${() => setIaModalOpen(false)} className="text-purple-200 hover:text-white"><i className="ph-bold ph-x text-xl"></i></button>
+                                </div>
+                                <div className="p-4 overflow-y-auto flex-1">
+                                    ${iaLoading ? html`
+                                        <div className="flex flex-col items-center justify-center py-12 text-slate-500">
+                                            <i className="ph ph-spinner animate-spin text-4xl mb-3"></i>
+                                            <p>Elaborando o laudo com base nos defeitos encontrados...</p>
+                                            <p className="text-xs mt-1">Pode levar até 30 segundos.</p>
+                                        </div>
+                                    ` : html`
+                                        <textarea value=${iaTexto} onChange=${e => setIaTexto(e.target.value)} rows="16" className="w-full p-3 border border-slate-300 rounded-lg text-sm leading-relaxed focus:ring-2 focus:ring-purple-500 outline-none" placeholder="O texto gerado aparecerá aqui..."></textarea>
+                                        <p className="text-xs text-slate-400 mt-2">Você pode editar o texto antes de copiar. A IA pode cometer erros — revise sempre.</p>
+                                    `}
+                                </div>
+                                ${!iaLoading && html`
+                                    <div className="p-4 border-t border-slate-200 flex gap-2 bg-slate-50 rounded-b-xl">
+                                        <button onClick=${gerarTextoIA} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-lg font-medium text-sm flex items-center gap-2"><i className="ph-bold ph-arrows-clockwise"></i> Gerar Novamente</button>
+                                        <button onClick=${copiarTextoIA} className="flex-1 bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg font-bold text-sm flex items-center justify-center gap-2"><i className="ph-bold ph-copy"></i> Copiar Texto</button>
+                                    </div>
+                                `}
                             </div>
                         </div>
                     `}
