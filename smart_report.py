@@ -1288,8 +1288,8 @@ def os_anexar(os_id):
     draft = next((d for d in drafts if d['id'] == os_id), None)
     if not draft:
         return jsonify({"error": "Rascunho não encontrado"}), 404
-    if draft.get('status') != 'sent' or not draft.get('omieOsId'):
-        return jsonify({"error": "OS precisa estar enviada ao Omie antes de anexar PDF."}), 400
+    if not draft.get('omieOsId'):
+        return jsonify({"error": "OS precisa estar enviada/importada do Omie antes de anexar PDF."}), 400
 
     body = request.json or {}
     pdf_b64 = body.get('pdf_base64') or ''
@@ -1305,13 +1305,13 @@ def os_anexar(os_id):
     except Exception:
         return jsonify({"error": "PDF base64 inválido"}), 400
 
-    md5_hash = hashlib.md5(pdf_bytes).hexdigest()
-
     # Zipa o PDF (Omie exige zip + base64)
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(filename, pdf_bytes)
-    zip_b64 = base64.b64encode(zip_buf.getvalue()).decode('utf-8')
+    zip_content = zip_buf.getvalue()
+    md5_hash = hashlib.md5(zip_content).hexdigest()  # MD5 do ZIP (não do PDF original)
+    zip_b64 = base64.b64encode(zip_content).decode('utf-8')
 
     cod_int = f"anx_{os_id}_{int(datetime.utcnow().timestamp())}"[:20]
 
@@ -1377,7 +1377,6 @@ def os_anexar_fotos(os_id):
     zip_content = zip_buf.getvalue()
     if not zip_content:
         return jsonify({"error": "Falha ao gerar ZIP"}), 500
-    md5_hash = hashlib.md5(zip_content).hexdigest()
 
     # Pra anexo Omie, o conteúdo precisa ser zip + base64.
     # Como já é um zip, faz outro envelope zip que contém o zip de fotos.
@@ -1385,7 +1384,9 @@ def os_anexar_fotos(os_id):
     filename = f"fotos_OS_{draft.get('omieOsNumber') or os_id}.zip"
     with zipfile.ZipFile(outer, 'w', zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(filename, zip_content)
-    outer_b64 = base64.b64encode(outer.getvalue()).decode('utf-8')
+    outer_bytes = outer.getvalue()
+    md5_hash = hashlib.md5(outer_bytes).hexdigest()  # MD5 do envelope final
+    outer_b64 = base64.b64encode(outer_bytes).decode('utf-8')
 
     cod_int = f"fts_{os_id}_{int(datetime.utcnow().timestamp())}"[:20]
     try:
@@ -1532,21 +1533,35 @@ def os_send(os_id):
     sys.stdout.flush()
 
     # Adiciona peças como "produtosUtilizados" (saída de estoque)
-    # Só inclui o bloco se tiver pelo menos UMA peça válida com omieProductId
     parts_validas = [p for p in (draft.get('parts') or []) if p.get('omieProductId')]
     if parts_validas:
+        # Se é update, consulta as peças atuais no Omie pra mapear nIdItemPU por produto
+        existing_parts_map = {}  # nCodProdutoPU -> nIdItemPU
+        if is_update:
+            try:
+                consulta = omie_call('/servicos/os/', 'ConsultarOS', {"nCodOS": int(draft['omieOsId'])})
+                prod_omie = (consulta.get('produtosUtilizados') or {}).get('produtoUtilizado') or []
+                for po in prod_omie:
+                    cod = po.get('nCodProdutoPU')
+                    nid = po.get('nIdItemPU') or po.get('nIdItem')
+                    if cod and nid:
+                        existing_parts_map[int(cod)] = int(nid)
+            except OmieError:
+                pass
+
         produtos_utilizados = []
         for p in parts_validas:
+            cod_prod = int(p.get('omieProductId') or 0)
             prod_item = {
-                "nCodProdutoPU": int(p.get('omieProductId') or 0),
+                "nCodProdutoPU": cod_prod,
                 "nQtdePU": float(p.get('quantity') or 1)
             }
-            # Se tem nIdItem original (peça veio do import), é alteração
-            if p.get('nIdItem'):
-                prod_item["nIdItemPU"] = int(p['nIdItem'])
+            # Prioriza nIdItem salvo, senão usa o mapeado da consulta
+            nid_orig = p.get('nIdItem') or existing_parts_map.get(cod_prod)
+            if nid_orig:
+                prod_item["nIdItemPU"] = int(nid_orig)
                 prod_item["cAcaoItemPU"] = "A"
             else:
-                # Peça nova
                 prod_item["cAcaoItemPU"] = "I"
             produtos_utilizados.append(prod_item)
         param["produtosUtilizados"] = {
