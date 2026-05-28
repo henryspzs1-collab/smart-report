@@ -2079,17 +2079,35 @@ HTML_PAGE = """
                     return;
                 }
                 alert('Gerando PDF... aguarde alguns segundos (pode parecer travado).');
-                // Aguarda DOM um momento (pra react re-renderizar caso necessário)
                 await new Promise(r => setTimeout(r, 100));
-                // Salva estilos originais e força visibilidade temporária pra capturar
-                const originalStyle = printEl.getAttribute('style') || '';
-                const originalClass = printEl.className;
-                // Remove a classe hidden e força display visible em position absolute fora da viewport
-                printEl.className = originalClass.replace(/\bhidden\b/g, '').trim();
-                printEl.style.cssText = 'display: block !important; position: absolute !important; left: 0 !important; top: 0 !important; width: 794px !important; background: white !important; color: black !important; padding: 20px !important; z-index: -1 !important; opacity: 0.01 !important; pointer-events: none !important;';
 
-                // Aguarda render
-                await new Promise(r => setTimeout(r, 300));
+                // CLONA o elemento e normaliza classes 'print:*' (transforma em equivalente direto)
+                // Isso simula o modo print no clone, sem afetar a tela do usuário.
+                const clone = printEl.cloneNode(true);
+                const normalize = (el) => {
+                    if (el.classList) {
+                        const classes = Array.from(el.classList);
+                        classes.forEach(cls => {
+                            if (cls.startsWith('print:')) {
+                                el.classList.remove(cls);
+                                const real = cls.substring(6);
+                                if (real) el.classList.add(real);
+                            }
+                        });
+                        // Se ainda tem 'hidden' mas tinha 'print:block', vai virar bloco (já foi adicionado acima)
+                        // Mas precisamos remover 'hidden' que sobrou
+                        if (el.classList.contains('hidden') && el.classList.contains('block')) {
+                            el.classList.remove('hidden');
+                        }
+                    }
+                    Array.from(el.children).forEach(normalize);
+                };
+                normalize(clone);
+                // Garante visibilidade do root do clone
+                clone.classList.remove('hidden');
+                clone.style.cssText = 'display: block !important; position: absolute !important; left: -99999px !important; top: 0 !important; width: 794px !important; background: white !important; color: black !important; padding: 20px !important;';
+                document.body.appendChild(clone);
+                await new Promise(r => setTimeout(r, 400));
 
                 try {
                     const opt = {
@@ -2099,7 +2117,7 @@ HTML_PAGE = """
                         html2canvas: { scale: 1.5, useCORS: true, logging: false, backgroundColor: '#ffffff', windowWidth: 794 },
                         jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
                     };
-                    const pdfBlob = await html2pdf().set(opt).from(printEl).outputPdf('blob');
+                    const pdfBlob = await html2pdf().set(opt).from(clone).outputPdf('blob');
                     // Converte Blob -> base64
                     const pdfB64 = await new Promise((resolve, reject) => {
                         const reader = new FileReader();
@@ -2128,9 +2146,8 @@ HTML_PAGE = """
                 } catch (err) {
                     alert('Erro ao gerar PDF: ' + (err.message || err));
                 } finally {
-                    // Reverte estilos
-                    printEl.setAttribute('style', originalStyle);
-                    printEl.className = originalClass;
+                    // Remove o clone do DOM
+                    try { document.body.removeChild(clone); } catch(e) {}
                 }
             };
 
