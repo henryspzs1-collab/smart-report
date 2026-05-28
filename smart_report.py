@@ -1798,7 +1798,7 @@ def _gerar_pdf_laudo(payload):
 
             # Marcador colorido: vermelho pra anormal, verde pra ok
             cor = '#dc2626' if anormal else '#16a34a'
-            marker = '&#9888;' if anormal else '&#10003;'  # ⚠ / ✓
+            marker = '&#8226;'  # bullet (WinAnsi-safe); cor indica anormal/ok
             story.append(Paragraph(f'<font color="{cor}">{marker}</font> {_esc(q.get("label",""))}', item_label))
             style = item_status_anormal if anormal else item_status_ok
             story.append(Paragraph(_esc(status), style))
@@ -1899,7 +1899,7 @@ def _gerar_pdf_laudo(payload):
                         dev = v - avg
                         is_max = v == vmax and len(vals) > 1
                         is_min = v == vmin and len(vals) > 1
-                        status_txt = '▲ Maior' if is_max else ('▼ Menor' if is_min else '● Normal')
+                        status_txt = 'Maior' if is_max else ('Menor' if is_min else 'Normal')
                         dev_str = f"{'+' if dev >= 0 else ''}{dev:.3f}"
                         rows.append([str(i+1), f"{v:.3f}", dev_str, status_txt])
                         row_colors.append('#1d4ed8' if is_max else ('#c2410c' if is_min else None))
