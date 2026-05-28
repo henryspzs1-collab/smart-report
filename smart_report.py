@@ -2435,13 +2435,13 @@ def os_send(os_id):
             else:
                 prod_item["cAcaoItemPU"] = "I"
             produtos_utilizados.append(prod_item)
-        # "REM" gera Pedido de Venda das peças (puxa o preço do cadastro do produto).
-        # "EST" só dava baixa de estoque sem faturar -> peças ficavam sem preço.
+        # "PED" gera Pedido de Venda das peças no faturamento (puxa o preço do cadastro do produto).
+        # "REM" gera só remessa (sem preço) e "EST" só baixa estoque -> ambos deixavam peças sem preço.
         categ_pv = get_categoria_pedido_venda_code()
         if not categ_pv:
             return jsonify({"error": f"Categoria '{CATEGORIA_PEDIDO_VENDA_PADRAO}' não encontrada no Omie. Verifique se ela existe no cadastro de Categorias (ou limpe o cache)."}), 400
         param["produtosUtilizados"] = {
-            "cAcaoProdUtilizados": "REM",
+            "cAcaoProdUtilizados": "PED",
             "cCodCategRem": categ_pv,
             "produtoUtilizado": produtos_utilizados
         }
