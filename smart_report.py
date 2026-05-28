@@ -1422,24 +1422,62 @@ def gerar_texto_ia():
     info_txt = "\n".join(info_lines) if info_lines else "Não informado."
     cell_txt = f"\n\nAnálise de células:\n{cell_summary}" if cell_summary else ""
 
-    prompt = f"""Você é um técnico especialista em manutenção de baterias de drones agrícolas (DJI Agras).
-Elabore um texto técnico profissional e objetivo para um laudo de inspeção, em português do Brasil,
-descrevendo o estado da bateria com base nos achados abaixo. O texto deve ser claro, formal e adequado
-para incluir em uma proposta comercial ao cliente. Não invente defeitos que não foram listados.
-Organize em parágrafos: 1) introdução breve, 2) defeitos/condições encontradas, 3) conclusão e recomendação.
+    from datetime import datetime as _dt
+    data_hoje = _dt.now().strftime('%d de %B de %Y')
+    meses = {'January':'janeiro','February':'fevereiro','March':'março','April':'abril','May':'maio','June':'junho','July':'julho','August':'agosto','September':'setembro','October':'outubro','November':'novembro','December':'dezembro'}
+    for en, pt in meses.items():
+        data_hoje = data_hoje.replace(en, pt)
 
-MODELO DA BATERIA: {model_name}
+    prompt = f"""Você é um técnico especialista do Laboratório BioDron - Soluções Tecnológicas, especializado em manutenção de baterias inteligentes de drones agrícolas DJI Agras.
+
+Elabore um LAUDO TÉCNICO DE DIAGNÓSTICO E ANÁLISE completo e profissional, em português do Brasil, com tom técnico e comercial, seguindo EXATAMENTE a estrutura do modelo abaixo. Para CADA defeito ou condição encontrada, explique a CONSEQUÊNCIA técnica e o RISCO de não corrigir (ex: adesivo danificado expõe a placa BMS a contaminação e infiltração; borrachas faltando comprometem a vedação IP e o amortecimento). Sempre que houver voltage drop / equalização, dê um parecer técnico relacionando o desnível com a contagem de ciclos e recomende equalização em bancada quando pertinente.
+
+NÃO invente defeitos que não foram informados. Use apenas os dados fornecidos. Se drone e carregador foram testados e estão OK, mencione na seção 1.
+
+=========================
+ESTRUTURA OBRIGATÓRIA (siga este formato):
+=========================
+
+LAUDO TÉCNICO DE DIAGNÓSTICO E ANÁLISE - BATERIA DJI AGRAS
+Equipamento: Bateria Inteligente de Voo DJI Agras {model_name}
+Data da Análise: {data_hoje}
+Status: Aguardando Aprovação de Orçamento
+
+1. Verificação de Equipamentos Associados (Testes Iniciais):
+[Resultado do teste com Drone e Carregador, se informados]
+
+2. Diagnóstico Eletrônico e Químico:
+[Contagem de ciclos, voltage drop/equalização, e Parecer Técnico explicando a química/sincronia das células]
+
+3. Diagnóstico Físico e Estrutural:
+[Painel de controle/adesivos, vedação/borrachas, danos físicos — cada um com sua consequência]
+
+4. Proposta de Serviço (Plano de Intervenção Corretiva e Preventiva):
+[Lista das intervenções recomendadas para corrigir cada item encontrado]
+
+5. Protocolo de Testes:
+[Texto sobre testes de bancada/estresse e voo após os serviços, e ressalva de possível nova análise se houver fadiga das células]
+
+Lembramos sempre que o orçamento detalhado encontra-se em anexo no e-mail ou enviado pelo WhatsApp.
+
+Assinado: Laboratório BioDron - Soluções Tecnológicas
+
+=========================
+DADOS REAIS DESTA BATERIA (use estes):
+=========================
+MODELO: {model_name}
 
 DADOS GERAIS:
 {info_txt}
 
-ACHADOS DA INSPEÇÃO:
+ACHADOS DA INSPEÇÃO (checklist):
 {achados_txt}{cell_txt}
 
-Escreva apenas o texto do laudo, sem títulos markdown, pronto para copiar e colar."""
+=========================
+Escreva o laudo completo seguindo a estrutura acima, em texto puro (sem markdown, sem asteriscos, sem ##), pronto para copiar e colar no Omie/proposta. Mantенha os títulos das seções numeradas."""
 
     def _build_body(modelo):
-        gen_config = {"temperature": 0.4, "maxOutputTokens": 2048}
+        gen_config = {"temperature": 0.5, "maxOutputTokens": 4096}
         # thinkingConfig só existe nos modelos 2.5 — desliga o "thinking" que trunca o texto
         if '2.5' in modelo:
             gen_config["thinkingConfig"] = {"thinkingBudget": 0}
