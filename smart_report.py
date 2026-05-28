@@ -1310,8 +1310,10 @@ def os_anexar(os_id):
     with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(filename, pdf_bytes)
     zip_content = zip_buf.getvalue()
-    md5_hash = hashlib.md5(zip_content).hexdigest()  # MD5 do ZIP (não do PDF original)
     zip_b64 = base64.b64encode(zip_content).decode('utf-8')
+    # Omie espera MD5 da STRING base64 (não dos bytes binários do zip)
+    md5_hash = hashlib.md5(zip_b64.encode('ascii')).hexdigest()
+    print(f"[ANEXAR-PDF] zip_size={len(zip_content)} b64_size={len(zip_b64)} md5={md5_hash}", flush=True)
 
     cod_int = f"anx_{os_id}_{int(datetime.utcnow().timestamp())}"[:20]
 
@@ -1385,8 +1387,10 @@ def os_anexar_fotos(os_id):
     with zipfile.ZipFile(outer, 'w', zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(filename, zip_content)
     outer_bytes = outer.getvalue()
-    md5_hash = hashlib.md5(outer_bytes).hexdigest()  # MD5 do envelope final
     outer_b64 = base64.b64encode(outer_bytes).decode('utf-8')
+    # Omie espera MD5 da STRING base64 (não dos bytes binários)
+    md5_hash = hashlib.md5(outer_b64.encode('ascii')).hexdigest()
+    print(f"[ANEXAR-FOTOS] outer_size={len(outer_bytes)} b64_size={len(outer_b64)} md5={md5_hash}", flush=True)
 
     cod_int = f"fts_{os_id}_{int(datetime.utcnow().timestamp())}"[:20]
     try:
