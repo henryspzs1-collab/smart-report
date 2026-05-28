@@ -1507,8 +1507,8 @@ Escreva o laudo completo seguindo a estrutura acima, em texto puro (sem markdown
             except Exception:
                 errbody = str(e)
             ultimo_erro = f"HTTP {e.code} ({modelo}): {errbody[:200]}"
-            # 429 (quota) ou 404 (modelo) → tenta o próximo modelo
-            if e.code in (429, 404):
+            # 429 (quota), 404 (modelo), 503/500 (sobrecarga) → tenta o próximo modelo
+            if e.code in (429, 404, 503, 500):
                 continue
             return jsonify({"error": f"Gemini {ultimo_erro}"}), 502
         except (KeyError, IndexError):
