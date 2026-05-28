@@ -1532,18 +1532,16 @@ def _gerar_pdf_laudo(payload):
                 vmin = min(vals)
                 drop = vmax - vmin
                 ratio = (drop / max_drop) if max_drop > 0 else 0
-                if drop == 0:
-                    bal_label, bal_color = 'Balanceada', colors.HexColor('#10b981')
-                elif ratio <= 0.25:
-                    bal_label, bal_color = 'Balanceada', colors.HexColor('#10b981')
+                if drop == 0 or ratio <= 0.25:
+                    bal_label, bal_hex = 'Balanceada', '#10b981'
                 elif ratio <= 0.5:
-                    bal_label, bal_color = 'Levemente Desbalanceada', colors.HexColor('#eab308')
+                    bal_label, bal_hex = 'Levemente Desbalanceada', '#eab308'
                 elif ratio <= 0.75:
-                    bal_label, bal_color = 'Quase no Limite', colors.HexColor('#f97316')
+                    bal_label, bal_hex = 'Quase no Limite', '#f97316'
                 elif ratio <= 1.0:
-                    bal_label, bal_color = 'No Limite', colors.HexColor('#ef4444')
+                    bal_label, bal_hex = 'No Limite', '#ef4444'
                 else:
-                    bal_label, bal_color = 'Totalmente Desbalanceada', colors.HexColor('#991b1b')
+                    bal_label, bal_hex = 'Totalmente Desbalanceada', '#991b1b'
 
                 story.append(PageBreak())
                 story.append(Paragraph('ANÁLISE DE CÉLULAS', h2))
@@ -1558,7 +1556,7 @@ def _gerar_pdf_laudo(payload):
                     ['Tensão mínima', f"{vmin:.3f} V"],
                     ['Voltage Drop', f"{drop:.3f} V"],
                     ['Limite configurado', f"{max_drop:.3f} V"],
-                    ['Status', Paragraph(f'<b><font color="{bal_color.hexval()[2:]}">{bal_label}</font></b>', body)],
+                    ['Status', Paragraph(f'<b><font color="{bal_hex}">{bal_label}</font></b>', body)],
                 ]
                 resumo_table = Table(resumo_data, colWidths=[55*mm, 55*mm])
                 resumo_table.setStyle(TableStyle([
