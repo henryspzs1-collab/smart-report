@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response
 import json
 import os
 import socket
@@ -1925,6 +1925,22 @@ def _gerar_pdf_laudo(payload):
     return buf.getvalue()
 
 
+@app.route('/api/gerar-pdf-download', methods=['POST'])
+def gerar_pdf_download():
+    """Gera o PDF do laudo (mesmo gerador do anexo Omie) e devolve pra download direto."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    payload = request.json or {}
+    try:
+        pdf_bytes = _gerar_pdf_laudo(payload)
+    except Exception as e:
+        return jsonify({"error": f"Falha ao gerar PDF: {e}"}), 500
+    filename = payload.get('filename') or 'laudo.pdf'
+    return Response(pdf_bytes, mimetype='application/pdf',
+                    headers={'Content-Disposition': f'attachment; filename="{filename}"'})
+
+
 @app.route('/api/os/<os_id>/gerar-pdf-anexar', methods=['POST'])
 def os_gerar_pdf_anexar(os_id):
     """Gera o PDF do laudo no servidor e anexa direto na OS do Omie (funciona em mobile)."""
@@ -3153,6 +3169,55 @@ HTML_PAGE = """
             };
 
             // ---- Geração de texto com IA (Gemini) ----
+            // ---- Gera PDF no servidor (mesmo layout do anexo Omie) e baixa ----
+            const _montarPayloadLaudo = () => {
+                const selectedModel = models.find(m => m.id === headerData.selectedTemplateId);
+                return {
+                    headerConfig,
+                    headerData,
+                    answers,
+                    questions: selectedModel ? selectedModel.questions : [],
+                    diagrams: selectedModel ? selectedModel.diagrams : [],
+                    diagramMarks,
+                    reportImages,
+                    logo,
+                    technician: (auth.firstName ? `${auth.firstName} ${auth.lastName||''}` : auth.token).trim(),
+                    technicianSignature: headerData.technicianSignature,
+                    showSignatures: headerData.showSignatures !== false,
+                    modelName: selectedModel ? selectedModel.name : '',
+                    cellAnalysis: selectedModel ? selectedModel.cellAnalysis : null,
+                    cellVoltagesList: selectedModel ? (cellVoltages[selectedModel.id] || []) : []
+                };
+            };
+
+            const baixarPdfLaudo = async () => {
+                const clientField = headerConfig.find(f => f.id === 'client');
+                const clientName = clientField ? (headerData[clientField.id] || 'laudo') : 'laudo';
+                const filename = `laudo_${clientName.replace(/[^a-zA-Z0-9_\-]/g, '_')}.pdf`;
+                const payload = { ..._montarPayloadLaudo(), filename };
+                try {
+                    const resp = await fetch('/api/gerar-pdf-download', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                        body: JSON.stringify(payload)
+                    });
+                    if (!resp.ok) {
+                        const t = await resp.text();
+                        alert('Erro ao gerar PDF: ' + t.substring(0, 200));
+                        return;
+                    }
+                    const blob = await resp.blob();
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                } catch (err) {
+                    alert('Erro: ' + (err.message || err));
+                }
+            };
+
             const gerarTextoIA = async () => {
                 const selectedModel = models.find(m => m.id === headerData.selectedTemplateId);
                 setIaModalOpen(true);
@@ -4520,7 +4585,7 @@ HTML_PAGE = """
                                 <button onClick=${() => setLaudosModalOpen(true)} className="px-3 py-2 bg-slate-700 rounded-lg text-sm font-medium hover:bg-slate-600 transition flex items-center gap-1"><i className="ph-bold ph-archive"></i> Laudos</button>
                                 <button onClick=${downloadImagesZip} className="px-3 py-2 bg-slate-700 rounded-lg text-sm font-medium hover:bg-slate-600 transition flex items-center gap-1" title="Baixar fotos do laudo atual em ZIP"><i className="ph-bold ph-download-simple"></i> Fotos ZIP</button>
                                 <button onClick=${clearCurrentReport} className="px-3 py-2 bg-slate-800 rounded-lg text-sm font-medium hover:bg-slate-700 transition">Limpar</button>
-                                <button onClick=${() => window.print()} className="px-3 py-2 bg-blue-600 rounded-lg font-medium flex items-center gap-1 hover:bg-blue-500 transition shadow-md"><i className="ph-bold ph-printer"></i> Gerar PDF</button>
+                                <button onClick=${baixarPdfLaudo} className="px-3 py-2 bg-blue-600 rounded-lg font-medium flex items-center gap-1 hover:bg-blue-500 transition shadow-md"><i className="ph-bold ph-file-pdf"></i> Gerar PDF</button>
                             </div>
                         </header>
 
