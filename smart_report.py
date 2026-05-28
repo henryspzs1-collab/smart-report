@@ -1822,6 +1822,9 @@ def _gerar_pdf_laudo(payload):
     if diagrams:
         story.append(secao('Mapeamento Visual'))
         story.append(Spacer(1, 2*mm))
+        legenda_x = ParagraphStyle('legenda_x', parent=body, fontSize=9, textColor=C_BAD, spaceAfter=4)
+        story.append(Paragraph('<b><font color="#dc2626">X</font></b> &nbsp; As marcações em vermelho indicam áreas com amassados, trincados ou danos físicos severos.', legenda_x))
+        story.append(Spacer(1, 2*mm))
         diag_imgs = []
         for d in diagrams:
             base = d.get('imageBase64')
