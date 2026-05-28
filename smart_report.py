@@ -2255,6 +2255,17 @@ HTML_PAGE = """
                 }
             }, [pendingImages]);
 
+            // Histórico de Laudos — fetch precisa estar ANTES de qualquer early return (regras de hooks)
+            const fetchLaudos = () => {
+                if (!auth) return;
+                fetch('/api/laudos', { headers: { 'Authorization': auth.token } })
+                    .then(r => r.json()).then(d => { if(Array.isArray(d)) setLaudosList(d); });
+            };
+
+            useEffect(() => {
+                if (auth && isLoaded) fetchLaudos();
+            }, [auth, isLoaded]);
+
             // Busca lista de usuários quando admin abre a aba "Usuários"
             const fetchUsers = () => {
                 fetch('/api/users', { headers: { 'Authorization': auth.token } })
@@ -2833,16 +2844,6 @@ HTML_PAGE = """
             });
 
             // ---- Histórico de Laudos ----
-            const fetchLaudos = () => {
-                if (!auth) return;
-                fetch('/api/laudos', { headers: { 'Authorization': auth.token } })
-                    .then(r => r.json()).then(d => { if(Array.isArray(d)) setLaudosList(d); });
-            };
-
-            useEffect(() => {
-                if (auth && isLoaded) fetchLaudos();
-            }, [auth, isLoaded]);
-
             const saveLaudo = async (name) => {
                 // Comprime as imagens novamente pra ficar leve no histórico
                 const compressed = await Promise.all((reportImages || []).map(async img => ({
