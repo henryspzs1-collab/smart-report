@@ -2075,23 +2075,28 @@ HTML_PAGE = """
                 // Pega o elemento da tela de impressão (busca em vários seletores possíveis)
                 let printEl = document.querySelector('[class*="print:block"]');
                 if (!printEl) {
-                    // Fallback: cria um div temporário com o conteúdo do laudo
                     alert('Não consegui encontrar o conteúdo do laudo na página. Tente: 1) ir na aba "Preencher Laudo", 2) voltar pra OS, 3) clicar Anexar PDF novamente.');
                     return;
                 }
                 alert('Gerando PDF... aguarde alguns segundos (pode parecer travado).');
+                // Aguarda DOM um momento (pra react re-renderizar caso necessário)
+                await new Promise(r => setTimeout(r, 100));
                 // Salva estilos originais e força visibilidade temporária pra capturar
                 const originalStyle = printEl.getAttribute('style') || '';
                 const originalClass = printEl.className;
-                printEl.style.cssText = 'display: block !important; position: fixed; left: -10000px; top: 0; width: 800px; background: white; color: black; padding: 20px; z-index: -1;';
-                printEl.className = originalClass.replace(/hidden/g, '');
+                // Remove a classe hidden e força display visible em position absolute fora da viewport
+                printEl.className = originalClass.replace(/\bhidden\b/g, '').trim();
+                printEl.style.cssText = 'display: block !important; position: absolute !important; left: 0 !important; top: 0 !important; width: 794px !important; background: white !important; color: black !important; padding: 20px !important; z-index: -1 !important; opacity: 0.01 !important; pointer-events: none !important;';
+
+                // Aguarda render
+                await new Promise(r => setTimeout(r, 300));
 
                 try {
                     const opt = {
                         margin: 10,
                         filename: `laudo_OS_${currentOs.omieOsNumber || currentOs.id}.pdf`,
                         image: { type: 'jpeg', quality: 0.85 },
-                        html2canvas: { scale: 1.5, useCORS: true, logging: false },
+                        html2canvas: { scale: 1.5, useCORS: true, logging: false, backgroundColor: '#ffffff', windowWidth: 794 },
                         jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
                     };
                     const pdfBlob = await html2pdf().set(opt).from(printEl).outputPdf('blob');
