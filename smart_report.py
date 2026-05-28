@@ -1278,6 +1278,289 @@ def os_debug(os_id):
     })
 
 
+def _gerar_pdf_laudo(payload):
+    """Gera PDF do laudo a partir do payload do frontend usando ReportLab."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
+    from reportlab.lib.utils import ImageReader
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=15*mm, rightMargin=15*mm, topMargin=15*mm, bottomMargin=15*mm)
+    story = []
+    styles = getSampleStyleSheet()
+    h1 = ParagraphStyle('h1', parent=styles['Heading1'], fontSize=14, spaceAfter=8, textColor=colors.black)
+    h2 = ParagraphStyle('h2', parent=styles['Heading2'], fontSize=11, spaceAfter=6, textColor=colors.HexColor('#1f2937'), backColor=colors.HexColor('#e5e7eb'), borderPadding=4)
+    body = ParagraphStyle('body', parent=styles['BodyText'], fontSize=9, leading=11)
+    small = ParagraphStyle('small', parent=body, fontSize=8, textColor=colors.HexColor('#6b7280'))
+
+    header_config = payload.get('headerConfig', [])
+    header_data = payload.get('headerData', {})
+    answers = payload.get('answers', {})
+    questions = payload.get('questions', [])
+    diagrams = payload.get('diagrams', [])
+    diagram_marks = payload.get('diagramMarks', {})
+    report_images = payload.get('reportImages', [])
+    logo = payload.get('logo')
+    technician = payload.get('technician', '')
+    technician_signature = payload.get('technicianSignature')
+    show_signatures = payload.get('showSignatures', True)
+    model_name = payload.get('modelName', '')
+
+    def _img_from_data_uri(uri, max_w=None, max_h=None):
+        """Cria Image do reportlab a partir de data URI."""
+        try:
+            if not uri or 'base64,' not in uri:
+                return None
+            b = base64.b64decode(uri.split(',', 1)[1])
+            img = ImageReader(io.BytesIO(b))
+            iw, ih = img.getSize()
+            ratio = iw / ih if ih else 1
+            if max_w and iw > max_w:
+                iw, ih = max_w, max_w / ratio
+            if max_h and ih > max_h:
+                iw, ih = max_h * ratio, max_h
+            return Image(io.BytesIO(b), width=iw, height=ih)
+        except Exception:
+            return None
+
+    # ---- Cabeçalho ----
+    header_row = []
+    if logo:
+        logo_img = _img_from_data_uri(logo, max_w=120, max_h=60)
+        if logo_img:
+            header_row.append(logo_img)
+        else:
+            header_row.append(Paragraph('<b>LAUDO TÉCNICO</b>', h1))
+    else:
+        header_row.append(Paragraph('<b>LAUDO TÉCNICO</b>', h1))
+
+    date_str = ''
+    if header_data.get('date'):
+        try:
+            from datetime import datetime as dt
+            d = dt.strptime(header_data['date'], '%Y-%m-%d')
+            date_str = d.strftime('%d/%m/%Y')
+        except Exception:
+            date_str = header_data.get('date', '')
+
+    right_text = f"<b>Relatório de Inspeção</b><br/><font size=7 color='#6b7280'>Ref: {model_name} | Data: {date_str} | Téc: {technician}</font>"
+    header_row.append(Paragraph(right_text, body))
+
+    t = Table([header_row], colWidths=[80*mm, 100*mm])
+    t.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('LINEBELOW', (0,0), (-1,-1), 1.5, colors.black),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 8),
+        ('ALIGN', (1,0), (1,0), 'RIGHT'),
+    ]))
+    story.append(t)
+    story.append(Spacer(1, 4*mm))
+
+    # ---- Informações Gerais ----
+    story.append(Paragraph('INFORMAÇÕES GERAIS', h2))
+    info_rows = []
+    for f in header_config:
+        label = f.get('label', '')
+        val = header_data.get(f.get('id', ''), '') or '-'
+        info_rows.append([Paragraph(f"<b>{label}:</b>", body), Paragraph(str(val).replace('\n', '<br/>'), body)])
+    if info_rows:
+        info_table = Table(info_rows, colWidths=[60*mm, 120*mm])
+        info_table.setStyle(TableStyle([
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#cbd5e1')),
+            ('BACKGROUND', (0,0), (0,-1), colors.HexColor('#f3f4f6')),
+            ('VALIGN', (0,0), (-1,-1), 'TOP'),
+            ('PADDING', (0,0), (-1,-1), 4),
+        ]))
+        story.append(info_table)
+    story.append(Spacer(1, 4*mm))
+
+    # ---- Checklist ----
+    if questions:
+        story.append(Paragraph('RESULTADOS DA INSPEÇÃO FÍSICA', h2))
+        rows = [[Paragraph('<b>Item Avaliado</b>', body), Paragraph('<b>Situação</b>', body)]]
+        for q in questions:
+            ans = answers.get(q.get('id'), {}) or {}
+            checked = ans.get('checked')
+            qtype = q.get('type', 'checkbox')
+            if qtype == 'text':
+                status = ans.get('text') or '-'
+            elif checked:
+                if qtype == 'checkbox_qty':
+                    status = f"{ans.get('qty', '-')} unid."
+                elif qtype == 'checkbox_text':
+                    status = ans.get('text') or 'Constatado'
+                else:
+                    status = 'Constatado'
+            else:
+                status = 'Não Constatado'
+            rows.append([Paragraph(q.get('label', ''), body), Paragraph(str(status), body)])
+        ck_table = Table(rows, colWidths=[130*mm, 50*mm])
+        ck_table.setStyle(TableStyle([
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#cbd5e1')),
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#e5e7eb')),
+            ('VALIGN', (0,0), (-1,-1), 'TOP'),
+            ('PADDING', (0,0), (-1,-1), 3),
+            ('ALIGN', (1,1), (1,-1), 'CENTER'),
+        ]))
+        story.append(ck_table)
+        story.append(Spacer(1, 4*mm))
+
+    # ---- Diagramas com marcações ----
+    if diagrams:
+        story.append(Paragraph('MAPEAMENTO VISUAL', h2))
+        diag_imgs = []
+        for d in diagrams:
+            base = d.get('imageBase64')
+            if not base:
+                continue
+            try:
+                img_data = base64.b64decode(base.split(',', 1)[1] if ',' in base else base)
+                from PIL import Image as PILImage, ImageDraw, ImageFont
+            except Exception:
+                # Sem Pillow, só insere a imagem sem marcações
+                img = _img_from_data_uri(base, max_w=85*mm, max_h=80*mm)
+                if img:
+                    diag_imgs.append([Paragraph(f"<b>{d.get('name','')}</b>", small), img])
+                continue
+            # Com Pillow: desenha as marcações em cima
+            try:
+                pil = PILImage.open(io.BytesIO(img_data)).convert('RGB')
+                draw = ImageDraw.Draw(pil)
+                marks = diagram_marks.get(d.get('id'), [])
+                w, h = pil.size
+                for m in marks:
+                    x = int(m.get('x', 0) / 100 * w)
+                    y = int(m.get('y', 0) / 100 * h)
+                    size = max(20, w // 30)
+                    draw.line([(x-size,y-size),(x+size,y+size)], fill='red', width=max(3, w//200))
+                    draw.line([(x-size,y+size),(x+size,y-size)], fill='red', width=max(3, w//200))
+                out_buf = io.BytesIO()
+                pil.save(out_buf, 'PNG')
+                out_buf.seek(0)
+                img = Image(out_buf, width=80*mm, height=70*mm, kind='proportional')
+                diag_imgs.append([Paragraph(f"<b>{d.get('name','')}</b>", small), img])
+            except Exception:
+                pass
+        # 2 colunas de diagramas
+        rows = []
+        for i in range(0, len(diag_imgs), 2):
+            chunk = diag_imgs[i:i+2]
+            if len(chunk) == 1:
+                chunk.append(['', ''])
+            row = []
+            for cell in chunk:
+                inner = Table([[cell[0]], [cell[1]]], colWidths=[85*mm])
+                inner.setStyle(TableStyle([('ALIGN', (0,0), (-1,-1), 'CENTER')]))
+                row.append(inner)
+            rows.append(row)
+        if rows:
+            outer = Table(rows, colWidths=[90*mm, 90*mm])
+            outer.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP'), ('PADDING', (0,0), (-1,-1), 4)]))
+            story.append(outer)
+        story.append(Spacer(1, 4*mm))
+
+    # ---- Fotos ----
+    if report_images:
+        story.append(PageBreak())
+        story.append(Paragraph('EVIDÊNCIAS FOTOGRÁFICAS', h2))
+        photo_rows = []
+        row = []
+        for idx, img_info in enumerate(report_images):
+            src = img_info.get('src', '')
+            cap = img_info.get('caption') or 'Sem legenda'
+            img = _img_from_data_uri(src, max_w=80*mm, max_h=70*mm)
+            if not img:
+                continue
+            cell = Table([[img], [Paragraph(cap, small)]], colWidths=[85*mm])
+            cell.setStyle(TableStyle([('ALIGN', (0,0), (-1,-1), 'CENTER'), ('PADDING', (0,0), (-1,-1), 2)]))
+            row.append(cell)
+            if len(row) == 2:
+                photo_rows.append(row); row = []
+        if row:
+            if len(row) == 1: row.append('')
+            photo_rows.append(row)
+        if photo_rows:
+            t = Table(photo_rows, colWidths=[90*mm, 90*mm])
+            t.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP'), ('PADDING', (0,0), (-1,-1), 4)]))
+            story.append(t)
+
+    # ---- Assinaturas ----
+    if show_signatures:
+        story.append(Spacer(1, 15*mm))
+        sig_cells = [[], []]
+        if technician_signature:
+            sig_img = _img_from_data_uri(technician_signature, max_w=60*mm, max_h=20*mm)
+            if sig_img:
+                sig_cells[0].append(sig_img)
+        sig_cells[0].append(Paragraph('_________________________<br/><b>Técnico Responsável</b>', body))
+        sig_cells[1].append(Spacer(1, 22*mm) if technician_signature else '')
+        sig_cells[1].append(Paragraph('_________________________<br/><b>Ciente do Cliente</b>', body))
+
+        sig_table = Table([
+            [sig_cells[0][0] if technician_signature else '', sig_cells[1][0] if sig_cells[1] and technician_signature else ''],
+            [sig_cells[0][-1], sig_cells[1][-1]]
+        ], colWidths=[90*mm, 90*mm])
+        sig_table.setStyle(TableStyle([
+            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+            ('VALIGN', (0,0), (-1,-1), 'BOTTOM'),
+        ]))
+        story.append(sig_table)
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+@app.route('/api/os/<os_id>/gerar-pdf-anexar', methods=['POST'])
+def os_gerar_pdf_anexar(os_id):
+    """Gera o PDF do laudo no servidor e anexa direto na OS do Omie (funciona em mobile)."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    drafts = _user_drafts(full_data, user)
+    draft = next((d for d in drafts if d['id'] == os_id), None)
+    if not draft:
+        return jsonify({"error": "Rascunho não encontrado"}), 404
+    if not draft.get('omieOsId'):
+        return jsonify({"error": "OS precisa estar enviada/importada do Omie."}), 400
+
+    payload = request.json or {}
+    try:
+        pdf_bytes = _gerar_pdf_laudo(payload)
+    except Exception as e:
+        return jsonify({"error": f"Falha ao gerar PDF: {e}"}), 500
+
+    filename = f"laudo_OS_{draft.get('omieOsNumber') or os_id}.pdf"
+
+    # Zipa e anexa no Omie
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(filename, pdf_bytes)
+    zip_content = zip_buf.getvalue()
+    zip_b64 = base64.b64encode(zip_content).decode('utf-8')
+    md5_hash = hashlib.md5(zip_b64.encode('ascii')).hexdigest()
+
+    cod_int = f"anx_{os_id}_{int(datetime.utcnow().timestamp())}"[:20]
+    try:
+        omie_call('/geral/anexo/', 'IncluirAnexo', {
+            "cCodIntAnexo": cod_int,
+            "cTabela": "ordem-servico",
+            "nId": draft['omieOsId'],
+            "cNomeArquivo": filename,
+            "cTipoArquivo": "pdf",
+            "cArquivo": zip_b64,
+            "cMd5": md5_hash
+        })
+        draft['pdfAnexado'] = True
+        draft['pdfAnexadoAt'] = datetime.utcnow().isoformat() + "Z"
+        save_data(full_data)
+        return jsonify({"success": True})
+    except OmieError as e:
+        return jsonify({"error": str(e)}), e.status
+
+
 @app.route('/api/os/<os_id>/anexar', methods=['POST'])
 def os_anexar(os_id):
     """Anexa um PDF (base64) à OS no Omie. PDF é zipado, base64-ado e enviado via IncluirAnexo."""
@@ -2063,91 +2346,49 @@ HTML_PAGE = """
             };
 
             const anexarLaudoPDF = async () => {
-                console.log('[anexarLaudoPDF] iniciando', currentOs);
                 if (!currentOs || !currentOs.omieOsId) {
                     alert('A OS precisa estar enviada/importada do Omie antes de anexar o PDF.');
                     return;
                 }
-                if (typeof html2pdf === 'undefined') {
-                    alert('Biblioteca de PDF (html2pdf) não carregou. Faça hard refresh (Ctrl+Shift+R) e tente de novo.');
-                    return;
-                }
-                // Pega o elemento da tela de impressão (busca em vários seletores possíveis)
-                let printEl = document.querySelector('[class*="print:block"]');
-                if (!printEl) {
-                    alert('Não consegui encontrar o conteúdo do laudo na página. Tente: 1) ir na aba "Preencher Laudo", 2) voltar pra OS, 3) clicar Anexar PDF novamente.');
-                    return;
-                }
-                alert('Gerando PDF... aguarde alguns segundos (pode parecer travado).');
-                await new Promise(r => setTimeout(r, 100));
+                if (!confirm('Gerar PDF do laudo no servidor e anexar à OS no Omie?')) return;
+                alert('Gerando PDF e enviando... aguarde alguns segundos.');
 
-                // CLONA o elemento e normaliza classes 'print:*' (transforma em equivalente direto)
-                // Isso simula o modo print no clone, sem afetar a tela do usuário.
-                const clone = printEl.cloneNode(true);
-                const normalize = (el) => {
-                    if (el.classList) {
-                        const classes = Array.from(el.classList);
-                        classes.forEach(cls => {
-                            if (cls.startsWith('print:')) {
-                                el.classList.remove(cls);
-                                const real = cls.substring(6);
-                                if (real) el.classList.add(real);
-                            }
-                        });
-                        // Se ainda tem 'hidden' mas tinha 'print:block', vai virar bloco (já foi adicionado acima)
-                        // Mas precisamos remover 'hidden' que sobrou
-                        if (el.classList.contains('hidden') && el.classList.contains('block')) {
-                            el.classList.remove('hidden');
-                        }
-                    }
-                    Array.from(el.children).forEach(normalize);
+                // Monta o payload com os dados atuais do laudo
+                const selectedModel = models.find(m => m.id === headerData.selectedTemplateId);
+                const payload = {
+                    headerConfig,
+                    headerData,
+                    answers,
+                    questions: selectedModel ? selectedModel.questions : [],
+                    diagrams: selectedModel ? selectedModel.diagrams : [],
+                    diagramMarks,
+                    reportImages,
+                    logo,
+                    technician: (auth.firstName ? `${auth.firstName} ${auth.lastName||''}` : auth.token).trim(),
+                    technicianSignature: headerData.technicianSignature,
+                    showSignatures: headerData.showSignatures !== false,
+                    modelName: selectedModel ? selectedModel.name : ''
                 };
-                normalize(clone);
-                // Garante visibilidade do root do clone
-                clone.classList.remove('hidden');
-                clone.style.cssText = 'display: block !important; position: absolute !important; left: -99999px !important; top: 0 !important; width: 794px !important; background: white !important; color: black !important; padding: 20px !important;';
-                document.body.appendChild(clone);
-                await new Promise(r => setTimeout(r, 400));
 
                 try {
-                    const opt = {
-                        margin: 10,
-                        filename: `laudo_OS_${currentOs.omieOsNumber || currentOs.id}.pdf`,
-                        image: { type: 'jpeg', quality: 0.85 },
-                        html2canvas: { scale: 1.5, useCORS: true, logging: false, backgroundColor: '#ffffff', windowWidth: 794 },
-                        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
-                    };
-                    const pdfBlob = await html2pdf().set(opt).from(clone).outputPdf('blob');
-                    // Converte Blob -> base64
-                    const pdfB64 = await new Promise((resolve, reject) => {
-                        const reader = new FileReader();
-                        reader.onloadend = () => resolve(reader.result.split(',')[1]);
-                        reader.onerror = reject;
-                        reader.readAsDataURL(pdfBlob);
-                    });
-
-                    // Envia pro backend
-                    const resp = await fetch(`/api/os/${currentOs.id}/anexar`, {
+                    const resp = await fetch(`/api/os/${currentOs.id}/gerar-pdf-anexar`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
-                        body: JSON.stringify({
-                            pdf_base64: pdfB64,
-                            filename: opt.filename
-                        })
+                        body: JSON.stringify(payload)
                     });
-                    const data = await resp.json();
+                    const text = await resp.text();
+                    let data;
+                    try { data = JSON.parse(text); }
+                    catch { alert(`Erro: resposta inválida (HTTP ${resp.status}): ${text.substring(0,200)}`); return; }
                     if (data.success) {
                         alert('PDF do laudo anexado à OS no Omie!');
                         setCurrentOs(prev => ({ ...prev, pdfAnexado: true }));
                         fetchOsDrafts();
                     } else {
-                        alert('Erro ao anexar: ' + (data.error || 'desconhecido'));
+                        alert('Erro: ' + (data.error || `HTTP ${resp.status}`));
                     }
                 } catch (err) {
-                    alert('Erro ao gerar PDF: ' + (err.message || err));
-                } finally {
-                    // Remove o clone do DOM
-                    try { document.body.removeChild(clone); } catch(e) {}
+                    alert('Erro: ' + (err.message || err));
                 }
             };
 
