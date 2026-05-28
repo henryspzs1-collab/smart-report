@@ -1438,10 +1438,15 @@ ACHADOS DA INSPEÇÃO:
 
 Escreva apenas o texto do laudo, sem títulos markdown, pronto para copiar e colar."""
 
-    req_body = json.dumps({
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 1200}
-    }).encode('utf-8')
+    def _build_body(modelo):
+        gen_config = {"temperature": 0.4, "maxOutputTokens": 2048}
+        # thinkingConfig só existe nos modelos 2.5 — desliga o "thinking" que trunca o texto
+        if '2.5' in modelo:
+            gen_config["thinkingConfig"] = {"thinkingBudget": 0}
+        return json.dumps({
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": gen_config
+        }).encode('utf-8')
 
     # Tenta vários modelos em ordem (free tier pode variar por conta)
     env_model = os.environ.get('GEMINI_MODEL')
@@ -1451,7 +1456,7 @@ Escreva apenas o texto do laudo, sem títulos markdown, pronto para copiar e col
         if not modelo:
             continue
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={api_key}"
-        req = urlreq.Request(url, data=req_body, headers={'Content-Type': 'application/json'})
+        req = urlreq.Request(url, data=_build_body(modelo), headers={'Content-Type': 'application/json'})
         try:
             with urlreq.urlopen(req, timeout=40) as resp:
                 raw = resp.read().decode('utf-8')
