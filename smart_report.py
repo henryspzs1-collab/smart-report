@@ -440,6 +440,103 @@ def reset_password(username):
     return jsonify({"success": True, "tempPassword": temp})
 
 
+@app.route('/api/laudos', methods=['GET', 'POST', 'DELETE'])
+def manage_laudos():
+    """CRUD de laudos salvos (histórico). Cada usuário tem seus laudos."""
+    user = request.headers.get('Authorization')
+    full_data = load_data()
+    if not user or user not in full_data['users']:
+        return jsonify({"error": "Não autorizado"}), 401
+
+    if 'laudos' not in full_data:
+        full_data['laudos'] = {}
+    if user not in full_data['laudos']:
+        full_data['laudos'][user] = {}
+
+    if request.method == 'GET':
+        summary = []
+        for lid, laudo in full_data['laudos'][user].items():
+            summary.append({"id": lid, "name": laudo.get("name", "Sem nome"), "date": laudo.get("date", "")})
+        # Mais recentes primeiro
+        summary.sort(key=lambda x: x.get('date', '') or '', reverse=True)
+        return jsonify(summary)
+
+    if request.method == 'POST':
+        payload = request.json or {}
+        action = payload.get('action', 'save')
+        if action == 'save':
+            import time
+            lid = payload.get('id') or ('laudo_' + str(int(time.time() * 1000)))
+            full_data['laudos'][user][lid] = {
+                "id": lid,
+                "name": payload.get('name', 'Sem nome'),
+                "date": payload.get('date', ''),
+                "state": payload.get('state', {}),
+                "savedAt": datetime.utcnow().isoformat() + "Z"
+            }
+            save_data(full_data)
+            return jsonify({"success": True, "id": lid})
+        if action == 'load':
+            lid = payload.get('id')
+            laudo = full_data['laudos'][user].get(lid)
+            if not laudo:
+                return jsonify({"error": "Laudo não encontrado"}), 404
+            return jsonify(laudo)
+        if action == 'duplicate':
+            import copy, time
+            lid = payload.get('id')
+            src = full_data['laudos'][user].get(lid)
+            if not src:
+                return jsonify({"error": "Laudo não encontrado"}), 404
+            new_id = 'laudo_' + str(int(time.time() * 1000))
+            dup = copy.deepcopy(src)
+            dup['id'] = new_id
+            dup['name'] = src['name'] + ' (Cópia)'
+            full_data['laudos'][user][new_id] = dup
+            save_data(full_data)
+            return jsonify({"success": True, "id": new_id})
+
+    if request.method == 'DELETE':
+        lid = (request.json or {}).get('id')
+        if lid and lid in full_data['laudos'][user]:
+            del full_data['laudos'][user][lid]
+            save_data(full_data)
+        return jsonify({"success": True})
+
+
+@app.route('/api/export-config', methods=['GET'])
+def export_config():
+    """Exporta configs globais + usuários + laudos como JSON (apenas admin)."""
+    user, full_data, err = _require_admin()
+    if err:
+        return err
+    return jsonify({
+        "globalConfig": full_data.get('globalConfig', {}),
+        "users": full_data.get('users', {}),  # cuidado: inclui hashes de senha
+        "laudos": full_data.get('laudos', {}),
+        "exportedAt": datetime.utcnow().isoformat() + "Z"
+    })
+
+
+@app.route('/api/import-config', methods=['POST'])
+def import_config():
+    """Importa configs/usuários/laudos de um JSON (apenas admin). Sobrescreve."""
+    user, full_data, err = _require_admin()
+    if err:
+        return err
+    payload = request.json or {}
+    if 'globalConfig' in payload:
+        full_data['globalConfig'] = payload['globalConfig']
+    if 'users' in payload:
+        full_data['users'] = payload['users']
+    if 'laudos' in payload:
+        full_data['laudos'] = payload['laudos']
+    if 'userStates' in payload:
+        full_data['userStates'] = payload['userStates']
+    save_data(full_data)
+    return jsonify({"success": True})
+
+
 @app.route('/api/users/<username>/role', methods=['POST'])
 def change_role(username):
     user, full_data, err = _require_admin()
@@ -1413,6 +1510,96 @@ def _gerar_pdf_laudo(payload):
             story.append(Paragraph(_esc(status), style))
         story.append(Spacer(1, 4*mm))
 
+    # ---- Análise de Células ----
+    cell_analysis = payload.get('cellAnalysis')  # { enabled, numCells, maxDropV }
+    cell_voltages_list = payload.get('cellVoltagesList') or []  # array de strings
+    if cell_analysis and cell_analysis.get('enabled') and cell_voltages_list:
+        try:
+            num_cells = int(cell_analysis.get('numCells') or 14)
+            max_drop = float(cell_analysis.get('maxDropV') or 0.2)
+            vals = []
+            for v in cell_voltages_list:
+                try:
+                    fv = float(v)
+                    if fv > 0:
+                        vals.append(fv)
+                except Exception:
+                    pass
+            if vals:
+                total = sum(vals)
+                avg = total / len(vals)
+                vmax = max(vals)
+                vmin = min(vals)
+                drop = vmax - vmin
+                ratio = (drop / max_drop) if max_drop > 0 else 0
+                if drop == 0:
+                    bal_label, bal_color = 'Balanceada', colors.HexColor('#10b981')
+                elif ratio <= 0.25:
+                    bal_label, bal_color = 'Balanceada', colors.HexColor('#10b981')
+                elif ratio <= 0.5:
+                    bal_label, bal_color = 'Levemente Desbalanceada', colors.HexColor('#eab308')
+                elif ratio <= 0.75:
+                    bal_label, bal_color = 'Quase no Limite', colors.HexColor('#f97316')
+                elif ratio <= 1.0:
+                    bal_label, bal_color = 'No Limite', colors.HexColor('#ef4444')
+                else:
+                    bal_label, bal_color = 'Totalmente Desbalanceada', colors.HexColor('#991b1b')
+
+                story.append(PageBreak())
+                story.append(Paragraph('ANÁLISE DE CÉLULAS', h2))
+
+                # Resumo
+                resumo_data = [
+                    [Paragraph('<b>Resumo</b>', body), ''],
+                    ['Células avaliadas', f"{len(vals)} de {num_cells}"],
+                    ['Tensão total', f"{total:.3f} V"],
+                    ['Tensão média', f"{avg:.3f} V"],
+                    ['Tensão máxima', f"{vmax:.3f} V"],
+                    ['Tensão mínima', f"{vmin:.3f} V"],
+                    ['Voltage Drop', f"{drop:.3f} V"],
+                    ['Limite configurado', f"{max_drop:.3f} V"],
+                    ['Status', Paragraph(f'<b><font color="{bal_color.hexval()[2:]}">{bal_label}</font></b>', body)],
+                ]
+                resumo_table = Table(resumo_data, colWidths=[55*mm, 55*mm])
+                resumo_table.setStyle(TableStyle([
+                    ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#cbd5e1')),
+                    ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1e293b')),
+                    ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+                    ('SPAN', (0,0), (1,0)),
+                    ('PADDING', (0,0), (-1,-1), 4),
+                ]))
+                story.append(resumo_table)
+                story.append(Spacer(1, 4*mm))
+
+                # Tabela de células
+                rows = [[Paragraph('<b>Célula</b>', body), Paragraph('<b>Tensão (V)</b>', body), Paragraph('<b>Desvio Médio</b>', body), Paragraph('<b>Status</b>', body)]]
+                for i in range(num_cells):
+                    raw = cell_voltages_list[i] if i < len(cell_voltages_list) else ''
+                    try:
+                        v = float(raw)
+                    except Exception:
+                        v = None
+                    if v is None or v <= 0:
+                        rows.append([str(i+1), '—', '—', '—'])
+                    else:
+                        dev = v - avg
+                        status_txt = '▲ Maior' if v == vmax and len(vals) > 1 else ('▼ Menor' if v == vmin and len(vals) > 1 else '● Normal')
+                        dev_str = f"{'+' if dev >= 0 else ''}{dev:.3f}"
+                        rows.append([str(i+1), f"{v:.3f}", dev_str, status_txt])
+                cells_table = Table(rows, colWidths=[20*mm, 35*mm, 35*mm, 35*mm])
+                cells_table.setStyle(TableStyle([
+                    ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#cbd5e1')),
+                    ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1e293b')),
+                    ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+                    ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                    ('FONTSIZE', (0,1), (-1,-1), 9),
+                    ('PADDING', (0,0), (-1,-1), 3),
+                ]))
+                story.append(cells_table)
+                story.append(Spacer(1, 4*mm))
+        except Exception as e:
+            print(f"[CELL ANALYSIS] erro ao gerar: {e}", flush=True)
+
     # ---- Diagramas com marcações ----
     if diagrams:
         story.append(Paragraph('MAPEAMENTO VISUAL', h2))
@@ -1893,6 +2080,7 @@ HTML_PAGE = """
     <script src="https://unpkg.com/htm@3.1.1/dist/htm.js"></script>
     <script src="https://unpkg.com/@phosphor-icons/web"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 
     <style>
         @media print {
@@ -1953,6 +2141,9 @@ HTML_PAGE = """
             const [diagramMarks, setDiagramMarks] = useState({});
             const [reportImages, setReportImages] = useState([]);
             const [pdfMargin, setPdfMargin] = useState('1.5cm');
+            const [cellVoltages, setCellVoltages] = useState({}); // { modelId: ["3.85", "3.86", ...] }
+            const [laudosList, setLaudosList] = useState([]);
+            const [laudosModalOpen, setLaudosModalOpen] = useState(false);
 
             // Estados UI para Modais e Imagens
             const [sourceModalOpen, setSourceModalOpen] = useState(false);
@@ -2019,6 +2210,7 @@ HTML_PAGE = """
                         setDiagramMarks(data.userState.diagramMarks || {});
                         setReportImages(data.userState.reportImages || []);
                         setPdfMargin(data.userState.pdfMargin || '1.5cm');
+                        setCellVoltages(data.userState.cellVoltages || {});
 
                         if(loadedModels.length > 0) setEditingModelId(loadedModels[0].id);
                         setIsLoaded(true);
@@ -2031,7 +2223,7 @@ HTML_PAGE = """
                 setIsSaving(true);
                 const timer = setTimeout(() => {
                     const payload = {
-                        userState: { headerData, answers, diagramMarks, reportImages, pdfMargin }
+                        userState: { headerData, answers, diagramMarks, reportImages, pdfMargin, cellVoltages }
                     };
 
                     // Se for admin, salva as configurações globais também
@@ -2052,7 +2244,7 @@ HTML_PAGE = """
                     });
                 }, 1000);
                 return () => clearTimeout(timer);
-            }, [headerConfig, headerData, models, answers, diagramMarks, logo, reportImages, pdfMargin, isLoaded, auth]);
+            }, [headerConfig, headerData, models, answers, diagramMarks, logo, reportImages, pdfMargin, cellVoltages, isLoaded, auth]);
 
             // Salva status temp de fotos antes da câmera abrir
             useEffect(() => {
@@ -2372,7 +2564,9 @@ HTML_PAGE = """
                     technician: (auth.firstName ? `${auth.firstName} ${auth.lastName||''}` : auth.token).trim(),
                     technicianSignature: headerData.technicianSignature,
                     showSignatures: headerData.showSignatures !== false,
-                    modelName: selectedModel ? selectedModel.name : ''
+                    modelName: selectedModel ? selectedModel.name : '',
+                    cellAnalysis: selectedModel ? selectedModel.cellAnalysis : null,
+                    cellVoltagesList: selectedModel ? (cellVoltages[selectedModel.id] || []) : []
                 };
 
                 try {
@@ -2492,6 +2686,8 @@ HTML_PAGE = """
                 setAnswers({});
                 setDiagramMarks({});
                 setReportImages([]);
+                setCellVoltages({});
+                setLaudosList([]);
             };
 
             if (!auth) {
@@ -2618,6 +2814,149 @@ HTML_PAGE = """
                 setAnswers({});
                 setDiagramMarks({});
                 setReportImages([]);
+                setCellVoltages({});
+            };
+
+            // ---- Compressão de imagens (max 1200px, JPEG 75%) ----
+            const compressImage = (dataUrl, maxW = 1200) => new Promise(resolve => {
+                const img = new Image();
+                img.onload = () => {
+                    const scale = img.width > maxW ? maxW / img.width : 1;
+                    const canvas = document.createElement('canvas');
+                    canvas.width = Math.round(img.width * scale);
+                    canvas.height = Math.round(img.height * scale);
+                    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+                    resolve(canvas.toDataURL('image/jpeg', 0.75));
+                };
+                img.onerror = () => resolve(dataUrl);
+                img.src = dataUrl;
+            });
+
+            // ---- Histórico de Laudos ----
+            const fetchLaudos = () => {
+                if (!auth) return;
+                fetch('/api/laudos', { headers: { 'Authorization': auth.token } })
+                    .then(r => r.json()).then(d => { if(Array.isArray(d)) setLaudosList(d); });
+            };
+
+            useEffect(() => {
+                if (auth && isLoaded) fetchLaudos();
+            }, [auth, isLoaded]);
+
+            const saveLaudo = async (name) => {
+                // Comprime as imagens novamente pra ficar leve no histórico
+                const compressed = await Promise.all((reportImages || []).map(async img => ({
+                    ...img, src: await compressImage(img.src)
+                })));
+                const state = { headerData, answers, diagramMarks, reportImages: compressed, pdfMargin, cellVoltages };
+                const clientField = headerConfig.find(f => f.id === 'client');
+                const clientName = clientField ? (headerData[clientField.id] || '') : '';
+                const finalName = name || (clientName ? `${clientName} — ${headerData.date || ''}` : 'Laudo ' + new Date().toLocaleDateString('pt-BR'));
+                fetch('/api/laudos', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                    body: JSON.stringify({ action: 'save', name: finalName, date: headerData.date, state })
+                }).then(r => r.json()).then(d => { if(d.success) { alert('Laudo salvo!'); fetchLaudos(); } });
+            };
+
+            const loadLaudo = (id) => {
+                fetch('/api/laudos', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                    body: JSON.stringify({ action: 'load', id })
+                }).then(r => r.json()).then(laudo => {
+                    if (laudo && laudo.state) {
+                        const s = laudo.state;
+                        setHeaderData(s.headerData || {});
+                        setAnswers(s.answers || {});
+                        setDiagramMarks(s.diagramMarks || {});
+                        setReportImages(s.reportImages || []);
+                        setPdfMargin(s.pdfMargin || '1.5cm');
+                        setCellVoltages(s.cellVoltages || {});
+                        setLaudosModalOpen(false);
+                        setActiveTab('report');
+                    }
+                });
+            };
+
+            const duplicateLaudo = (id) => {
+                fetch('/api/laudos', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                    body: JSON.stringify({ action: 'duplicate', id })
+                }).then(r => r.json()).then(() => fetchLaudos());
+            };
+
+            const deleteLaudo = (id) => {
+                fetch('/api/laudos', {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                    body: JSON.stringify({ id })
+                }).then(() => fetchLaudos());
+            };
+
+            // ---- Backup/Import config (admin) ----
+            const exportConfig = () => {
+                fetch('/api/export-config', { headers: { 'Authorization': auth.token } })
+                    .then(r => r.json()).then(data => {
+                        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `biodron_backup_${new Date().toISOString().slice(0,10)}.json`;
+                        a.click();
+                        URL.revokeObjectURL(url);
+                    });
+            };
+
+            const importConfig = (file) => {
+                if (!confirm('Importar este arquivo vai SOBRESCREVER configs/usuários/laudos atuais. Confirma?')) return;
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        const data = JSON.parse(e.target.result);
+                        fetch('/api/import-config', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                            body: JSON.stringify(data)
+                        }).then(r => r.json()).then(d => {
+                            if (d.success) { alert('Importado! Recarregando...'); window.location.reload(); }
+                            else alert('Erro: ' + (d.error || 'desconhecido'));
+                        });
+                    } catch (err) { alert('Arquivo inválido: ' + err.message); }
+                };
+                reader.readAsText(file);
+            };
+
+            // ---- Download fotos como ZIP ----
+            const downloadImagesZip = async () => {
+                if (!reportImages || reportImages.length === 0) {
+                    alert('Nenhuma foto adicionada ao laudo.');
+                    return;
+                }
+                if (typeof JSZip === 'undefined') {
+                    alert('Biblioteca JSZip não carregou. Faça hard refresh.');
+                    return;
+                }
+                const zip = new JSZip();
+                const folder = zip.folder('evidencias');
+                for (let i = 0; i < reportImages.length; i++) {
+                    const img = reportImages[i];
+                    const base64 = (img.src || '').split(',')[1];
+                    if (!base64) continue;
+                    const ext = (img.src.indexOf('image/png') !== -1) ? 'png' : 'jpg';
+                    const safeName = (img.caption || ('foto_' + (i+1))).replace(/[^a-zA-Z0-9_\-]/g, '_');
+                    folder.file(`${(i+1).toString().padStart(2,'0')}_${safeName}.${ext}`, base64, { base64: true });
+                }
+                const blob = await zip.generateAsync({ type: 'blob' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                const clientField = headerConfig.find(f => f.id === 'client');
+                const clientName = clientField ? (headerData[clientField.id] || 'laudo') : 'laudo';
+                a.download = `evidencias_${clientName.replace(/[^a-zA-Z0-9_\-]/g, '_')}.zip`;
+                a.click();
+                URL.revokeObjectURL(url);
             };
 
             const handleLogoUpload = (e) => {
@@ -2669,8 +3008,13 @@ HTML_PAGE = """
                 e.target.value = null;
             };
 
-            const confirmPendingImages = () => {
-                setReportImages(prev => [...prev, ...pendingImages]);
+            const confirmPendingImages = async () => {
+                // Comprime as fotos antes de adicionar (reduz tamanho)
+                const compressed = await Promise.all(pendingImages.map(async img => ({
+                    ...img,
+                    src: await compressImage(img.src)
+                })));
+                setReportImages(prev => [...prev, ...compressed]);
                 setPendingImages([]);
             };
 
@@ -2961,6 +3305,90 @@ HTML_PAGE = """
                             </div>
                         `}
 
+                        ${selectedModel && selectedModel.cellAnalysis && selectedModel.cellAnalysis.enabled && html`
+                            <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                                <h2 className="text-xl font-semibold mb-1 text-slate-800 flex items-center gap-2">
+                                    <i className="ph-fill ph-lightning text-yellow-500 text-2xl"></i> Análise de Células
+                                </h2>
+                                <p className="text-sm text-slate-500 mb-4">Informe a tensão individual de cada célula. Pressione Enter para avançar.</p>
+                                ${(() => {
+                                    const ca = selectedModel.cellAnalysis;
+                                    const numCells = ca.numCells || 14;
+                                    const maxDrop = ca.maxDropV || 0.2;
+                                    const modelKey = selectedModel.id;
+                                    const voltages = cellVoltages[modelKey] || [];
+                                    const vals = voltages.map(v => parseFloat(v)).filter(v => !isNaN(v) && v > 0);
+                                    const total = vals.reduce((s,v)=>s+v,0);
+                                    const avg = vals.length ? total/vals.length : 0;
+                                    const maxV = vals.length ? Math.max(...vals) : 0;
+                                    const minV = vals.length ? Math.min(...vals) : 0;
+                                    const drop = maxV - minV;
+                                    const dropPct = maxDrop > 0 ? Math.min(drop/maxDrop, 1) : 0;
+                                    const getBalance = (d, mx) => {
+                                        if (d === 0) return { label: '—', color: 'text-slate-400', bar: 'bg-slate-300' };
+                                        const r = d / mx;
+                                        if (r <= 0.25) return { label: 'Balanceada', color: 'text-emerald-600', bar: 'bg-emerald-500' };
+                                        if (r <= 0.5) return { label: 'Levemente Desbalanceada', color: 'text-yellow-600', bar: 'bg-yellow-400' };
+                                        if (r <= 0.75) return { label: 'Quase no Limite', color: 'text-orange-600', bar: 'bg-orange-500' };
+                                        if (r <= 1.0) return { label: 'No Limite', color: 'text-red-600', bar: 'bg-red-500' };
+                                        return { label: 'Totalmente Desbalanceada', color: 'text-red-800', bar: 'bg-red-700' };
+                                    };
+                                    const bal = vals.length >= 2 ? getBalance(drop, maxDrop) : null;
+                                    return html`
+                                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                                            <div className="md:col-span-2">
+                                                <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
+                                                    ${Array.from({ length: numCells }, (_, i) => html`
+                                                        <div key=${i} className="flex items-center gap-1.5">
+                                                            <span className="text-xs font-bold text-slate-400 w-5 text-right">${i+1}</span>
+                                                            <input
+                                                                type="number" step="0.001" placeholder="0.000"
+                                                                value=${voltages[i] || ''}
+                                                                id=${'cv-' + modelKey + '-' + i}
+                                                                onKeyDown=${(e) => {
+                                                                    if (e.key === 'Enter') {
+                                                                        e.preventDefault();
+                                                                        const next = document.getElementById('cv-' + modelKey + '-' + (i+1));
+                                                                        if (next) { next.focus(); next.select(); }
+                                                                    }
+                                                                }}
+                                                                onChange=${(e) => {
+                                                                    const arr = [...(cellVoltages[modelKey] || Array(numCells).fill(''))];
+                                                                    while(arr.length < numCells) arr.push('');
+                                                                    arr[i] = e.target.value;
+                                                                    setCellVoltages({...cellVoltages, [modelKey]: arr});
+                                                                }}
+                                                                className="w-full p-1.5 text-sm border border-slate-300 rounded focus:ring-2 focus:ring-yellow-400 outline-none text-center font-mono"
+                                                            />
+                                                        </div>
+                                                    `)}
+                                                </div>
+                                            </div>
+                                            <div className="flex flex-col gap-3">
+                                                <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 space-y-2 text-sm">
+                                                    <div className="flex justify-between"><span className="text-slate-500">Tensão Total</span><span className="font-bold font-mono">${total.toFixed(3)} V</span></div>
+                                                    <div className="flex justify-between"><span className="text-slate-500">Tensão Média</span><span className="font-bold font-mono">${avg.toFixed(3)} V</span></div>
+                                                    <div className="flex justify-between"><span className="text-slate-500">Máxima</span><span className="font-bold font-mono text-blue-600">${maxV.toFixed(3)} V</span></div>
+                                                    <div className="flex justify-between"><span className="text-slate-500">Mínima</span><span className="font-bold font-mono text-blue-600">${minV.toFixed(3)} V</span></div>
+                                                    <div className="flex justify-between border-t border-slate-200 pt-2"><span className="text-slate-500 font-bold">Voltage Drop</span><span className=${'font-bold font-mono ' + (drop > maxDrop ? 'text-red-600' : 'text-emerald-600')}>${drop.toFixed(3)} V</span></div>
+                                                </div>
+                                                ${bal && html`
+                                                    <div className="bg-slate-50 border border-slate-200 rounded-lg p-4">
+                                                        <p className="text-xs font-bold text-slate-500 uppercase mb-2">Status</p>
+                                                        <div className="w-full bg-slate-200 rounded-full h-3 mb-2 overflow-hidden">
+                                                            <div className=${'h-3 rounded-full transition-all ' + bal.bar} style=${{ width: Math.max(dropPct*100, 4) + '%' }}></div>
+                                                        </div>
+                                                        <p className=${'text-sm font-bold ' + bal.color}>${bal.label}</p>
+                                                        <p className="text-xs text-slate-400 mt-1">Limite: ${maxDrop.toFixed(3)} V</p>
+                                                    </div>
+                                                `}
+                                            </div>
+                                        </div>
+                                    `;
+                                })()}
+                            </div>
+                        `}
+
                         ${selectedModel && selectedModel.diagrams.length > 0 && html`
                             <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                                 <h2 className="text-xl font-semibold mb-2 text-slate-800 flex items-center gap-2">
@@ -3065,11 +3493,20 @@ HTML_PAGE = """
 
                 return html`
                     <div className="space-y-8 animate-in fade-in duration-300">
-                        <div className="bg-indigo-50 border border-indigo-200 p-4 rounded-xl flex items-center gap-3 text-indigo-800">
-                            <i className="ph-fill ph-info text-2xl"></i>
-                            <div>
-                                <h3 className="font-bold">Aviso Administrativo</h3>
-                                <p className="text-sm">As alterações feitas nesta aba afetam <b>todos os usuários</b> do sistema.</p>
+                        <div className="bg-indigo-50 border border-indigo-200 p-4 rounded-xl flex flex-col md:flex-row items-start md:items-center gap-3 text-indigo-800">
+                            <div className="flex items-center gap-3 flex-1">
+                                <i className="ph-fill ph-info text-2xl"></i>
+                                <div>
+                                    <h3 className="font-bold">Aviso Administrativo</h3>
+                                    <p className="text-sm">As alterações feitas nesta aba afetam <b>todos os usuários</b> do sistema.</p>
+                                </div>
+                            </div>
+                            <div className="flex gap-2 flex-wrap">
+                                <button onClick=${exportConfig} className="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-1"><i className="ph-bold ph-export"></i> Exportar Backup</button>
+                                <label className="cursor-pointer bg-white hover:bg-indigo-50 border border-indigo-300 text-indigo-700 px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-1">
+                                    <i className="ph-bold ph-upload"></i> Importar Backup
+                                    <input type="file" accept=".json,application/json" onChange=${e => { const f = e.target.files[0]; if (f) importConfig(f); e.target.value=''; }} className="hidden" />
+                                </label>
                             </div>
                         </div>
 
@@ -3163,6 +3600,37 @@ HTML_PAGE = """
                                                 `)}
                                             </div>
                                         `}
+                                    </div>
+
+                                    <div>
+                                        <div className="flex justify-between items-center mb-4 border-b border-slate-200 pb-2">
+                                            <h3 className="font-bold text-lg flex items-center gap-2 text-slate-700"><i className="ph-fill ph-lightning text-yellow-500"></i> Análise de Células (Tensão)</h3>
+                                        </div>
+                                        <div className="space-y-3 p-4 bg-slate-50 rounded-lg border border-slate-200 mb-6">
+                                            <label className="flex items-center gap-3 cursor-pointer">
+                                                <input type="checkbox" checked=${(currentEditingModel.cellAnalysis && currentEditingModel.cellAnalysis.enabled) || false}
+                                                    onChange=${e => updateCurrentModel('cellAnalysis', { ...(currentEditingModel.cellAnalysis || {}), enabled: e.target.checked, numCells: (currentEditingModel.cellAnalysis||{}).numCells || 14, maxDropV: (currentEditingModel.cellAnalysis||{}).maxDropV || 0.2 })}
+                                                    className="w-5 h-5 text-yellow-500 rounded cursor-pointer" />
+                                                <span className="font-semibold text-slate-700">Ativar Análise de Células neste modelo</span>
+                                            </label>
+                                            ${currentEditingModel.cellAnalysis && currentEditingModel.cellAnalysis.enabled && html`
+                                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-200">
+                                                    <div>
+                                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Nº de Células</label>
+                                                        <input type="number" min="1" max="200" value=${currentEditingModel.cellAnalysis.numCells || 14}
+                                                            onChange=${e => updateCurrentModel('cellAnalysis', { ...currentEditingModel.cellAnalysis, numCells: parseInt(e.target.value) || 14 })}
+                                                            className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-yellow-400 outline-none font-bold" />
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Voltage Drop Máx. (V)</label>
+                                                        <input type="number" min="0.001" step="0.001" value=${currentEditingModel.cellAnalysis.maxDropV || 0.2}
+                                                            onChange=${e => updateCurrentModel('cellAnalysis', { ...currentEditingModel.cellAnalysis, maxDropV: parseFloat(e.target.value) || 0.2 })}
+                                                            className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-yellow-400 outline-none font-bold" />
+                                                        <p className="text-xs text-slate-400 mt-1">Diferença máx-mín tolerada</p>
+                                                    </div>
+                                                </div>
+                                            `}
+                                        </div>
                                     </div>
 
                                     <div>
@@ -3776,9 +4244,11 @@ HTML_PAGE = """
                                     <button onClick=${handleLogout} className="ml-2 text-red-400 hover:text-red-300 underline font-medium text-xs">Sair da Conta</button>
                                 </span>
                             </div>
-                            <div className="flex gap-2">
-                                <button onClick=${clearCurrentReport} className="px-4 py-2 bg-slate-800 rounded-lg text-sm font-medium hover:bg-slate-700 transition">Limpar Laudo</button>
-                                <button onClick=${() => window.print()} className="px-4 py-2 bg-blue-600 rounded-lg font-medium flex items-center gap-2 hover:bg-blue-500 transition shadow-md"><i className="ph-bold ph-printer"></i> Gerar PDF</button>
+                            <div className="flex gap-2 flex-wrap">
+                                <button onClick=${() => setLaudosModalOpen(true)} className="px-3 py-2 bg-slate-700 rounded-lg text-sm font-medium hover:bg-slate-600 transition flex items-center gap-1"><i className="ph-bold ph-archive"></i> Laudos</button>
+                                <button onClick=${downloadImagesZip} className="px-3 py-2 bg-slate-700 rounded-lg text-sm font-medium hover:bg-slate-600 transition flex items-center gap-1" title="Baixar fotos do laudo atual em ZIP"><i className="ph-bold ph-download-simple"></i> Fotos ZIP</button>
+                                <button onClick=${clearCurrentReport} className="px-3 py-2 bg-slate-800 rounded-lg text-sm font-medium hover:bg-slate-700 transition">Limpar</button>
+                                <button onClick=${() => window.print()} className="px-3 py-2 bg-blue-600 rounded-lg font-medium flex items-center gap-1 hover:bg-blue-500 transition shadow-md"><i className="ph-bold ph-printer"></i> Gerar PDF</button>
                             </div>
                         </header>
 
@@ -3812,6 +4282,45 @@ HTML_PAGE = """
                                     <button onClick=${() => cameraInputRef.current.click()} className="w-full flex items-center justify-center gap-3 bg-blue-600 hover:bg-blue-700 text-white p-4 rounded-xl font-medium transition shadow-sm"><i className="ph-fill ph-camera text-2xl"></i> Tirar Foto (Câmera)</button>
                                     <button onClick=${() => galleryInputRef.current.click()} className="w-full flex items-center justify-center gap-3 bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 p-4 rounded-xl font-medium transition"><i className="ph-fill ph-image text-2xl"></i> Importar da Galeria</button>
                                     <button onClick=${() => setSourceModalOpen(false)} className="w-full mt-2 p-3 text-red-500 font-medium hover:bg-red-50 rounded-xl transition">Cancelar</button>
+                                </div>
+                            </div>
+                        </div>
+                    `}
+
+                    ${laudosModalOpen && html`
+                        <div className="print:hidden fixed inset-0 bg-slate-900/70 z-[60] flex items-end md:items-center justify-center p-4">
+                            <div className="bg-white rounded-t-2xl md:rounded-xl shadow-2xl w-full max-w-lg max-h-[90vh] flex flex-col">
+                                <div className="p-4 bg-slate-800 text-white flex items-center justify-between rounded-t-2xl md:rounded-t-xl">
+                                    <h3 className="font-bold text-lg flex items-center gap-2"><i className="ph-fill ph-archive"></i> Laudos Salvos</h3>
+                                    <button onClick=${() => setLaudosModalOpen(false)} className="text-slate-400 hover:text-white"><i className="ph-bold ph-x text-xl"></i></button>
+                                </div>
+                                <div className="p-4 border-b border-slate-200 flex gap-2 flex-wrap">
+                                    <button onClick=${() => { const clientField = headerConfig.find(f => f.id === 'client'); const cli = clientField ? (headerData[clientField.id] || '') : ''; const sug = cli ? `${cli} — ${headerData.date||''}` : ('Laudo ' + new Date().toLocaleDateString('pt-BR')); const n = prompt('Nome do laudo:', sug); if (n !== null) saveLaudo(n || sug); }} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium text-sm flex items-center gap-2"><i className="ph-bold ph-floppy-disk"></i> Salvar Laudo Atual</button>
+                                    <button onClick=${clearCurrentReport} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-lg font-medium text-sm flex items-center gap-2"><i className="ph-bold ph-plus"></i> Novo Laudo</button>
+                                </div>
+                                <div className="overflow-y-auto flex-1">
+                                    ${laudosList.length === 0 ? html`
+                                        <div className="p-8 text-center text-slate-400">
+                                            <i className="ph ph-archive text-4xl mb-2 block"></i>
+                                            <p>Nenhum laudo salvo ainda.</p>
+                                            <p className="text-xs mt-1">Preencha o laudo e clique em "Salvar Laudo Atual".</p>
+                                        </div>
+                                    ` : laudosList.map(l => html`
+                                        <div key=${l.id} className="flex items-center gap-3 p-4 border-b border-slate-100 hover:bg-slate-50">
+                                            <div className="flex-1 min-w-0">
+                                                <p className="font-semibold text-slate-800 truncate">${l.name}</p>
+                                                <p className="text-xs text-slate-400">${l.date ? new Date(l.date).toLocaleDateString('pt-BR') : '—'}</p>
+                                            </div>
+                                            <div className="flex gap-1 shrink-0">
+                                                <button onClick=${() => loadLaudo(l.id)} className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-3 py-1.5 rounded text-xs font-medium" title="Carregar"><i className="ph-bold ph-folder-open"></i></button>
+                                                <button onClick=${() => duplicateLaudo(l.id)} className="bg-slate-100 hover:bg-slate-200 text-slate-600 px-3 py-1.5 rounded text-xs font-medium" title="Duplicar"><i className="ph-bold ph-copy"></i></button>
+                                                <button onClick=${() => { if(confirm('Excluir o laudo "' + l.name + '"?')) deleteLaudo(l.id); }} className="bg-red-50 hover:bg-red-100 text-red-600 px-3 py-1.5 rounded text-xs font-medium" title="Excluir"><i className="ph-bold ph-trash"></i></button>
+                                            </div>
+                                        </div>
+                                    `)}
+                                </div>
+                                <div className="p-3 border-t border-slate-200 bg-slate-50 text-xs text-slate-400 text-center rounded-b-xl">
+                                    ${laudosList.length} laudo(s) salvos
                                 </div>
                             </div>
                         </div>
