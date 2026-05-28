@@ -1445,6 +1445,9 @@ def os_send(os_id):
         qty = float(s.get('quantity') or 1)
         price = float(s.get('unitPrice') or 0)
         desc = s.get('description') or ''
+        # No primeiro serviço, anexa observações como parte da descrição detalhada do serviço
+        if idx == 0 and obs_combinada:
+            desc = (desc + "\n\n" + obs_combinada).strip()
         item = {
             "nSeqItem": idx + 1,
             "nCodServico": int(sid),
@@ -1517,7 +1520,7 @@ def os_send(os_id):
         "InformacoesAdicionais": {
             "cCodCateg": draft.get('cCodCategFromOmie') or cod_categ,
             "nCodCC": draft.get('nCodCCFromOmie') or nCodCC,
-            "cDadosAdicNF": obs_combinada or "Ordem de Serviço gerada via Biodron Smart Report Pro"
+            "cDadosAdicNF": ""
         },
         "ServicosPrestados": itens
     }
@@ -2005,6 +2008,7 @@ HTML_PAGE = """
             };
 
             const anexarFotosLaudo = async () => {
+                console.log('[anexarFotosLaudo] iniciando', { os: currentOs, fotos: reportImages?.length });
                 if (!currentOs || !currentOs.omieOsId) {
                     alert('A OS precisa estar enviada/importada do Omie.');
                     return;
@@ -2014,6 +2018,7 @@ HTML_PAGE = """
                     return;
                 }
                 if (!confirm(`Anexar ${reportImages.length} foto(s) à OS no Omie como ZIP?`)) return;
+                alert('Enviando fotos... aguarde.');
 
                 try {
                     const resp = await fetch(`/api/os/${currentOs.id}/anexar-fotos`, {
@@ -2021,34 +2026,41 @@ HTML_PAGE = """
                         headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
                         body: JSON.stringify({ photos: reportImages })
                     });
-                    const data = await resp.json();
+                    const text = await resp.text();
+                    let data;
+                    try { data = JSON.parse(text); }
+                    catch (e) { alert(`Erro: resposta inválida do servidor (HTTP ${resp.status}). Conteúdo: ${text.substring(0, 200)}`); return; }
                     if (data.success) {
                         alert(`${data.count} foto(s) anexada(s) com sucesso!`);
                         setCurrentOs(prev => ({ ...prev, fotosAnexadas: true, fotosCount: data.count }));
                         fetchOsDrafts();
                     } else {
-                        alert('Erro: ' + (data.error || 'desconhecido'));
+                        alert('Erro do servidor: ' + (data.error || `HTTP ${resp.status}`));
                     }
                 } catch (err) {
-                    alert('Erro: ' + (err.message || err));
+                    console.error('[anexarFotosLaudo] erro', err);
+                    alert('Erro de rede: ' + (err.message || err));
                 }
             };
 
             const anexarLaudoPDF = async () => {
-                if (!currentOs || currentOs.status !== 'sent') {
-                    alert('A OS precisa estar ENVIADA antes de anexar o PDF.');
+                console.log('[anexarLaudoPDF] iniciando', currentOs);
+                if (!currentOs || !currentOs.omieOsId) {
+                    alert('A OS precisa estar enviada/importada do Omie antes de anexar o PDF.');
                     return;
                 }
                 if (typeof html2pdf === 'undefined') {
-                    alert('Biblioteca de PDF ainda carregando. Tente novamente em alguns segundos.');
+                    alert('Biblioteca de PDF (html2pdf) não carregou. Faça hard refresh (Ctrl+Shift+R) e tente de novo.');
                     return;
                 }
-                // Pega o elemento da tela de impressão
-                const printEl = document.querySelector('.print\\:block');
+                // Pega o elemento da tela de impressão (busca em vários seletores possíveis)
+                let printEl = document.querySelector('[class*="print:block"]');
                 if (!printEl) {
-                    alert('Não consegui encontrar o conteúdo do laudo. Vá na aba "Preencher Laudo" e volte.');
+                    // Fallback: cria um div temporário com o conteúdo do laudo
+                    alert('Não consegui encontrar o conteúdo do laudo na página. Tente: 1) ir na aba "Preencher Laudo", 2) voltar pra OS, 3) clicar Anexar PDF novamente.');
                     return;
                 }
+                alert('Gerando PDF... aguarde alguns segundos (pode parecer travado).');
                 // Salva estilos originais e força visibilidade temporária pra capturar
                 const originalStyle = printEl.getAttribute('style') || '';
                 const originalClass = printEl.className;
