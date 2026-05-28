@@ -2382,7 +2382,8 @@ def os_send(os_id):
             cod_prod = int(p.get('omieProductId') or 0)
             prod_item = {
                 "nCodProdutoPU": cod_prod,
-                "nQtdePU": float(p.get('quantity') or 1)
+                "nQtdePU": float(p.get('quantity') or 1),
+                "vUnitarioPU": float(p.get('unitPrice') or 0)
             }
             # Prioriza nIdItem salvo, senão usa o mapeado da consulta
             nid_orig = p.get('nIdItem') or existing_parts_map.get(cod_prod)
