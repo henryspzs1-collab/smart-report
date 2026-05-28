@@ -1438,29 +1438,43 @@ ACHADOS DA INSPEÇÃO:
 
 Escreva apenas o texto do laudo, sem títulos markdown, pronto para copiar e colar."""
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
     req_body = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.4, "maxOutputTokens": 1200}
     }).encode('utf-8')
 
-    req = urlreq.Request(url, data=req_body, headers={'Content-Type': 'application/json'})
-    try:
-        with urlreq.urlopen(req, timeout=40) as resp:
-            raw = resp.read().decode('utf-8')
-        data = json.loads(raw)
-        texto = data['candidates'][0]['content']['parts'][0]['text'].strip()
-        return jsonify({"success": True, "texto": texto})
-    except HTTPError as e:
+    # Tenta vários modelos em ordem (free tier pode variar por conta)
+    env_model = os.environ.get('GEMINI_MODEL')
+    modelos = [env_model] if env_model else ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest', 'gemini-2.5-flash-lite']
+    ultimo_erro = ''
+    for modelo in modelos:
+        if not modelo:
+            continue
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={api_key}"
+        req = urlreq.Request(url, data=req_body, headers={'Content-Type': 'application/json'})
         try:
-            errbody = e.read().decode('utf-8')
-        except Exception:
-            errbody = str(e)
-        return jsonify({"error": f"Gemini HTTP {e.code}: {errbody[:300]}"}), 502
-    except (KeyError, IndexError):
-        return jsonify({"error": "Resposta do Gemini sem texto (pode ter sido bloqueada por segurança)."}), 502
-    except URLError as e:
-        return jsonify({"error": f"Falha de conexão com Gemini: {e.reason}"}), 502
+            with urlreq.urlopen(req, timeout=40) as resp:
+                raw = resp.read().decode('utf-8')
+            data = json.loads(raw)
+            texto = data['candidates'][0]['content']['parts'][0]['text'].strip()
+            return jsonify({"success": True, "texto": texto, "modelo": modelo})
+        except HTTPError as e:
+            try:
+                errbody = e.read().decode('utf-8')
+            except Exception:
+                errbody = str(e)
+            ultimo_erro = f"HTTP {e.code} ({modelo}): {errbody[:200]}"
+            # 429 (quota) ou 404 (modelo) → tenta o próximo modelo
+            if e.code in (429, 404):
+                continue
+            return jsonify({"error": f"Gemini {ultimo_erro}"}), 502
+        except (KeyError, IndexError):
+            ultimo_erro = f"Resposta sem texto ({modelo}) — pode ter sido bloqueada por segurança."
+            continue
+        except URLError as e:
+            return jsonify({"error": f"Falha de conexão com Gemini: {e.reason}"}), 502
+
+    return jsonify({"error": f"Gemini: todos os modelos falharam. Último erro: {ultimo_erro}"}), 502
 
 
 def _gerar_pdf_laudo(payload):
