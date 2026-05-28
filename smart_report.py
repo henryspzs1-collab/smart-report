@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, Response
+from flask import Flask, jsonify, request, Response, g
 import json
 import os
 import socket
@@ -54,7 +54,8 @@ def public_user_view(username: str, user: dict) -> dict:
         "email": user.get("email", ""),
         "phone": user.get("phone", ""),
         "mustResetPassword": user.get("mustResetPassword", False),
-        "createdAt": user.get("createdAt", "")
+        "createdAt": user.get("createdAt", ""),
+        "filialId": user.get("filialId", "matriz")
     }
 
 
@@ -68,7 +69,8 @@ def ensure_user_fields(user: dict) -> dict:
         "email": "",
         "phone": "",
         "mustResetPassword": False,
-        "createdAt": datetime.utcnow().isoformat() + "Z"
+        "createdAt": datetime.utcnow().isoformat() + "Z",
+        "filialId": "matriz"
     }
     for k, v in defaults.items():
         if k not in user:
@@ -167,6 +169,24 @@ def load_data():
         ensure_user_fields(u)
         if u != before:
             changed = True
+
+    # Migração: filiais (multi-empresa Omie). "matriz" usa as credenciais das env vars.
+    if "filiais" not in data:
+        data["filiais"] = {
+            "matriz": {
+                "id": "matriz",
+                "nome": "Matriz",
+                "omieAppKey": "",      # vazio = usa OMIE_APP_KEY do ambiente
+                "omieAppSecret": ""
+            }
+        }
+        changed = True
+    # Garante que todo usuário tem filialId (default: matriz)
+    for uname, u in data.get("users", {}).items():
+        if "filialId" not in u:
+            u["filialId"] = "matriz"
+            changed = True
+
     if changed:
         save_data(data)
 
@@ -325,11 +345,22 @@ def update_data():
     return jsonify({"status": "success"})
 
 
+def _set_omie_context(full_data, username):
+    """Define no contexto da requisição as credenciais Omie + filial do usuário logado."""
+    u = full_data.get('users', {}).get(username, {})
+    filial_id = u.get('filialId') or 'matriz'
+    filial = (full_data.get('filiais') or {}).get(filial_id) or {}
+    g.filial_id = filial_id
+    g.omie_app_key = filial.get('omieAppKey') or os.environ.get('OMIE_APP_KEY')
+    g.omie_app_secret = filial.get('omieAppSecret') or os.environ.get('OMIE_APP_SECRET')
+
+
 def _require_admin():
     user = request.headers.get('Authorization')
     full_data = load_data()
     if not user or user not in full_data['users'] or full_data['users'][user]['role'] != 'admin':
         return None, None, (jsonify({"error": "Não autorizado"}), 401)
+    _set_omie_context(full_data, user)
     return user, full_data, None
 
 
@@ -352,6 +383,7 @@ def manage_users():
         last = (body.get('lastName') or '').strip()
         email = (body.get('email') or '').strip().lower()
         phone = (body.get('phone') or '').strip()
+        filial_id = (body.get('filialId') or 'matriz').strip()
 
         if not new_user or not new_pass:
             return jsonify({"error": "Preencha usuário e senha"}), 400
@@ -369,7 +401,8 @@ def manage_users():
             "email": email,
             "phone": phone,
             "mustResetPassword": False,
-            "createdAt": datetime.utcnow().isoformat() + "Z"
+            "createdAt": datetime.utcnow().isoformat() + "Z",
+            "filialId": filial_id
         }
         save_data(full_data)
         return jsonify({"success": True})
@@ -504,6 +537,61 @@ def manage_laudos():
         return jsonify({"success": True})
 
 
+@app.route('/api/filiais', methods=['GET', 'POST', 'DELETE'])
+def manage_filiais():
+    """CRUD de filiais (cada uma com suas credenciais Omie). Apenas admin."""
+    user, full_data, err = _require_admin()
+    if err:
+        return err
+    if 'filiais' not in full_data:
+        full_data['filiais'] = {}
+
+    if request.method == 'GET':
+        # Não vaza os segredos — só indica se está configurado
+        out = []
+        for fid, f in full_data['filiais'].items():
+            out.append({
+                "id": fid,
+                "nome": f.get('nome', fid),
+                "omieConfigured": bool(f.get('omieAppKey') and f.get('omieAppSecret')),
+                "usaEnvVar": not bool(f.get('omieAppKey'))
+            })
+        return jsonify(out)
+
+    if request.method == 'POST':
+        body = request.json or {}
+        fid = (body.get('id') or '').strip()
+        nome = (body.get('nome') or '').strip()
+        if not nome:
+            return jsonify({"error": "Informe o nome da filial"}), 400
+        if not fid:
+            fid = 'filial_' + str(int(datetime.utcnow().timestamp()))
+        existing = full_data['filiais'].get(fid, {})
+        nova = {
+            "id": fid,
+            "nome": nome,
+            # Só atualiza credenciais se foram enviadas (não apaga ao editar só o nome)
+            "omieAppKey": body.get('omieAppKey') if body.get('omieAppKey') is not None else existing.get('omieAppKey', ''),
+            "omieAppSecret": body.get('omieAppSecret') if body.get('omieAppSecret') is not None else existing.get('omieAppSecret', '')
+        }
+        full_data['filiais'][fid] = nova
+        save_data(full_data)
+        return jsonify({"success": True, "id": fid})
+
+    if request.method == 'DELETE':
+        fid = (request.json or {}).get('id')
+        if fid == 'matriz':
+            return jsonify({"error": "Não é possível excluir a Matriz"}), 400
+        if fid in full_data['filiais']:
+            # Move usuários da filial excluída pra matriz
+            for u in full_data['users'].values():
+                if u.get('filialId') == fid:
+                    u['filialId'] = 'matriz'
+            del full_data['filiais'][fid]
+            save_data(full_data)
+        return jsonify({"success": True})
+
+
 @app.route('/api/export-config', methods=['GET'])
 def export_config():
     """Exporta configs globais + usuários + laudos como JSON (apenas admin)."""
@@ -554,6 +642,21 @@ def change_role(username):
     return jsonify({"success": True})
 
 
+@app.route('/api/users/<username>/filial', methods=['POST'])
+def change_filial(username):
+    user, full_data, err = _require_admin()
+    if err:
+        return err
+    if username not in full_data['users']:
+        return jsonify({"error": "Usuário não encontrado"}), 404
+    fid = (request.json or {}).get('filialId')
+    if fid not in (full_data.get('filiais') or {}):
+        return jsonify({"error": "Filial inválida"}), 400
+    full_data['users'][username]['filialId'] = fid
+    save_data(full_data)
+    return jsonify({"success": True})
+
+
 # ==========================================================
 #  INTEGRAÇÃO OMIE
 # ==========================================================
@@ -600,9 +703,14 @@ def _flush_omie_cache():
         pass
 
 
+def _cache_fkey(key):
+    """Prefixa a chave de cache com a filial atual (isola catálogos entre filiais)."""
+    return f"{getattr(g, 'filial_id', 'matriz')}:{key}"
+
+
 def _cache_get(key):
     import time
-    item = _omie_cache.get(key)
+    item = _omie_cache.get(_cache_fkey(key))
     if not item:
         return None
     ts = item.get('ts', 0)
@@ -614,7 +722,7 @@ def _cache_get(key):
 def _cache_set(key, payload):
     import time
     global _omie_cache_dirty
-    _omie_cache[key] = {'ts': time.time(), 'data': payload}
+    _omie_cache[_cache_fkey(key)] = {'ts': time.time(), 'data': payload}
     _omie_cache_dirty = True
     _flush_omie_cache()
 
@@ -633,10 +741,11 @@ class OmieNoRecords(Exception):
 
 def omie_call(endpoint: str, call: str, param: dict, timeout: int = 20):
     """Chama a API Omie. endpoint ex: '/geral/clientes/'. param é um dict (vai virar lista de 1 elemento)."""
-    app_key = os.environ.get("OMIE_APP_KEY")
-    app_secret = os.environ.get("OMIE_APP_SECRET")
+    # Usa credenciais da filial do usuário (setadas em g), com fallback pras env vars
+    app_key = getattr(g, 'omie_app_key', None) or os.environ.get("OMIE_APP_KEY")
+    app_secret = getattr(g, 'omie_app_secret', None) or os.environ.get("OMIE_APP_SECRET")
     if not app_key or not app_secret:
-        raise OmieError("Credenciais Omie não configuradas no servidor (OMIE_APP_KEY / OMIE_APP_SECRET).", status=503)
+        raise OmieError("Credenciais Omie não configuradas para esta filial.", status=503)
 
     url = OMIE_BASE + endpoint
     body = json.dumps({
@@ -681,6 +790,7 @@ def _require_user():
         return None, None, (jsonify({"error": "Não autorizado"}), 401)
     if full_data['users'][user].get('status') != 'active':
         return None, None, (jsonify({"error": "Conta inativa"}), 403)
+    _set_omie_context(full_data, user)
     return user, full_data, None
 
 
@@ -2398,6 +2508,7 @@ HTML_PAGE = """
             // Estados do Admin
             const [editingModelId, setEditingModelId] = useState(null);
             const [usersList, setUsersList] = useState([]);
+            const [filiaisList, setFiliaisList] = useState([]);
 
             // Estados de Ordens de Serviço (Omie)
             const [osDrafts, setOsDrafts] = useState([]);
@@ -2514,9 +2625,43 @@ HTML_PAGE = """
                     .then(r => r.json()).then(data => { if(Array.isArray(data)) setUsersList(data); });
             };
 
+            const fetchFiliais = () => {
+                fetch('/api/filiais', { headers: { 'Authorization': auth.token } })
+                    .then(r => r.json()).then(data => { if(Array.isArray(data)) setFiliaisList(data); });
+            };
+
+            const salvarFilial = (payload) => {
+                return fetch('/api/filiais', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                    body: JSON.stringify(payload)
+                }).then(r => r.json()).then(d => {
+                    if (d.success) { fetchFiliais(); return true; }
+                    alert(d.error || 'Erro ao salvar filial'); return false;
+                });
+            };
+
+            const excluirFilial = (id) => {
+                if (!confirm('Excluir esta filial? Os usuários dela voltam pra Matriz.')) return;
+                fetch('/api/filiais', {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                    body: JSON.stringify({ id })
+                }).then(r => r.json()).then(() => fetchFiliais());
+            };
+
+            const trocarFilialUsuario = (username, filialId) => {
+                fetch(`/api/users/${encodeURIComponent(username)}/filial`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                    body: JSON.stringify({ filialId })
+                }).then(r => r.json()).then(d => { if (d.success) fetchUsers(); else alert(d.error || 'Erro'); });
+            };
+
             useEffect(() => {
-                if (auth && auth.role === 'admin' && activeTab === 'users') {
+                if (auth && auth.role === 'admin' && (activeTab === 'users' || activeTab === 'settings')) {
                     fetchUsers();
+                    fetchFiliais();
                 }
             }, [activeTab, auth]);
 
@@ -3851,6 +3996,41 @@ HTML_PAGE = """
                         </div>
 
                         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                            <h2 className="text-xl font-semibold mb-2 text-slate-800 flex items-center gap-2">
+                                <i className="ph-fill ph-buildings text-indigo-600 text-2xl"></i> Filiais (Contas Omie)
+                            </h2>
+                            <p className="text-sm text-slate-500 mb-4">Cada filial usa sua própria conta Omie. Os usuários vinculados a uma filial usam automaticamente as credenciais dela. A <b>Matriz</b> usa as credenciais padrão do servidor se você deixar em branco.</p>
+                            <div className="space-y-3 mb-4">
+                                ${filiaisList.map(f => html`
+                                    <div key=${f.id} className="border border-slate-200 rounded-lg p-3 bg-slate-50 flex flex-col md:flex-row md:items-center gap-3 justify-between">
+                                        <div className="flex-1">
+                                            <div className="font-bold text-slate-800">${f.nome} <span className="text-xs text-slate-400 font-mono">(${f.id})</span></div>
+                                            <div className="text-xs mt-1">
+                                                ${f.omieConfigured
+                                                    ? html`<span className="text-green-600 font-medium"><i className="ph-fill ph-check-circle"></i> Credenciais Omie próprias configuradas</span>`
+                                                    : (f.usaEnvVar
+                                                        ? html`<span className="text-amber-600 font-medium"><i className="ph-fill ph-warning"></i> Usando credenciais padrão do servidor</span>`
+                                                        : html`<span className="text-red-600 font-medium">Sem credenciais</span>`)}
+                                            </div>
+                                        </div>
+                                        <div className="flex gap-2">
+                                            <button onClick=${() => {
+                                                const k = prompt('Omie App Key da filial "' + f.nome + '" (deixe vazio pra usar a do servidor):', '');
+                                                if (k === null) return;
+                                                const s = prompt('Omie App Secret da filial "' + f.nome + '":', '');
+                                                if (s === null) return;
+                                                salvarFilial({ id: f.id, nome: f.nome, omieAppKey: k, omieAppSecret: s });
+                                            }} className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-3 py-1.5 rounded text-sm font-medium border border-indigo-200"><i className="ph-bold ph-key"></i> Credenciais Omie</button>
+                                            <button onClick=${() => { const n = prompt('Novo nome da filial:', f.nome); if (n) salvarFilial({ id: f.id, nome: n }); }} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded text-sm font-medium"><i className="ph-bold ph-pencil"></i></button>
+                                            ${f.id !== 'matriz' && html`<button onClick=${() => excluirFilial(f.id)} className="bg-red-50 hover:bg-red-100 text-red-700 px-3 py-1.5 rounded text-sm font-medium"><i className="ph-bold ph-trash"></i></button>`}
+                                        </div>
+                                    </div>
+                                `)}
+                            </div>
+                            <button onClick=${() => { const n = prompt('Nome da nova filial (ex: Filial Cidade X):', ''); if (n) salvarFilial({ nome: n }); }} className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2"><i className="ph-bold ph-plus"></i> Nova Filial</button>
+                        </div>
+
+                        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                             <h2 className="text-xl font-semibold mb-4 text-slate-800 flex items-center gap-2">
                                 <i className="ph-fill ph-image text-indigo-600 text-2xl"></i> Logo da Empresa no PDF
                             </h2>
@@ -4019,7 +4199,8 @@ HTML_PAGE = """
                         firstName: f.firstName.value,
                         lastName: f.lastName.value,
                         email: f.email.value,
-                        phone: f.phone.value
+                        phone: f.phone.value,
+                        filialId: f.filialId ? f.filialId.value : 'matriz'
                     };
                     fetch('/api/users', {
                         method: 'POST',
@@ -4112,7 +4293,10 @@ HTML_PAGE = """
                                     <option value="user">Usuário Padrão</option>
                                     <option value="admin">Administrador</option>
                                 </select>
-                                <button type="submit" className="bg-blue-600 text-white px-6 py-2 rounded font-medium hover:bg-blue-700">Criar Usuário</button>
+                                <select name="filialId" className="p-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-500 outline-none bg-white">
+                                    ${filiaisList.map(f => html`<option key=${f.id} value=${f.id}>Filial: ${f.nome}</option>`)}
+                                </select>
+                                <button type="submit" className="bg-blue-600 text-white px-6 py-2 rounded font-medium hover:bg-blue-700 md:col-span-2">Criar Usuário</button>
                             </form>
                         </div>
 
@@ -4128,6 +4312,7 @@ HTML_PAGE = """
                                             <th className="p-3 font-bold">Login</th>
                                             <th className="p-3 font-bold">Contato</th>
                                             <th className="p-3 font-bold">Acesso</th>
+                                            <th className="p-3 font-bold">Filial</th>
                                             <th className="p-3 font-bold">Status</th>
                                             <th className="p-3 font-bold text-right">Ações</th>
                                         </tr>
@@ -4143,6 +4328,11 @@ HTML_PAGE = """
                                                 </td>
                                                 <td className="p-3">
                                                     <span className=${`px-2 py-0.5 rounded text-xs font-bold ${u.role==='admin'?'bg-indigo-100 text-indigo-700':'bg-slate-200 text-slate-700'}`}>${u.role.toUpperCase()}</span>
+                                                </td>
+                                                <td className="p-3">
+                                                    <select value=${u.filialId || 'matriz'} onChange=${e => trocarFilialUsuario(u.username, e.target.value)} className="text-xs p-1 border border-slate-300 rounded bg-white">
+                                                        ${filiaisList.map(f => html`<option key=${f.id} value=${f.id}>${f.nome}</option>`)}
+                                                    </select>
                                                 </td>
                                                 <td className="p-3">${statusBadge(u.status)}</td>
                                                 <td className="p-3 text-right whitespace-nowrap">
