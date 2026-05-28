@@ -1529,14 +1529,46 @@ def _gerar_pdf_laudo(payload):
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
     from reportlab.lib.utils import ImageReader
 
+    # Paleta da marca
+    C_PRIMARY = colors.HexColor('#1e40af')   # azul Biodron
+    C_DARK = colors.HexColor('#1e293b')      # slate escuro
+    C_LIGHT = colors.HexColor('#f1f5f9')     # cinza claro (zebra)
+    C_BORDER = colors.HexColor('#d1d5db')
+    C_MUTED = colors.HexColor('#6b7280')
+    C_OK = colors.HexColor('#16a34a')
+    C_BAD = colors.HexColor('#dc2626')
+
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=15*mm, rightMargin=15*mm, topMargin=15*mm, bottomMargin=15*mm)
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=15*mm, rightMargin=15*mm, topMargin=16*mm, bottomMargin=16*mm, title="Laudo Técnico - Biodron")
     story = []
     styles = getSampleStyleSheet()
-    h1 = ParagraphStyle('h1', parent=styles['Heading1'], fontSize=14, spaceAfter=8, textColor=colors.black)
-    h2 = ParagraphStyle('h2', parent=styles['Heading2'], fontSize=11, spaceAfter=6, textColor=colors.HexColor('#1f2937'), backColor=colors.HexColor('#e5e7eb'), borderPadding=4)
-    body = ParagraphStyle('body', parent=styles['BodyText'], fontSize=9, leading=11)
-    small = ParagraphStyle('small', parent=body, fontSize=8, textColor=colors.HexColor('#6b7280'))
+    h1 = ParagraphStyle('h1', parent=styles['Heading1'], fontSize=15, spaceAfter=2, textColor=C_DARK)
+    h2 = ParagraphStyle('h2', parent=styles['Heading2'], fontSize=11, spaceBefore=4, spaceAfter=8, textColor=colors.white, fontName='Helvetica-Bold', leading=14)
+    body = ParagraphStyle('body', parent=styles['BodyText'], fontSize=9, leading=12, textColor=C_DARK)
+    small = ParagraphStyle('small', parent=body, fontSize=8, textColor=C_MUTED)
+
+    def secao(titulo):
+        """Título de seção em barra colorida (full-width)."""
+        tbl = Table([[Paragraph(titulo.upper(), h2)]], colWidths=[180*mm])
+        tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,-1), C_PRIMARY),
+            ('LEFTPADDING', (0,0), (-1,-1), 8),
+            ('TOPPADDING', (0,0), (-1,-1), 4),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+        ]))
+        return tbl
+
+    # Rodapé com numeração de página + marca
+    def _on_page(canvas, doc_):
+        canvas.saveState()
+        canvas.setStrokeColor(C_BORDER)
+        canvas.setLineWidth(0.5)
+        canvas.line(15*mm, 12*mm, 195*mm, 12*mm)
+        canvas.setFont('Helvetica', 7)
+        canvas.setFillColor(C_MUTED)
+        canvas.drawString(15*mm, 8*mm, "Laboratório BioDron · Soluções Tecnológicas")
+        canvas.drawRightString(195*mm, 8*mm, f"Página {doc_.page}")
+        canvas.restoreState()
 
     header_config = payload.get('headerConfig', [])
     header_data = payload.get('headerData', {})
@@ -1569,16 +1601,6 @@ def _gerar_pdf_laudo(payload):
             return None
 
     # ---- Cabeçalho ----
-    header_row = []
-    if logo:
-        logo_img = _img_from_data_uri(logo, max_w=120, max_h=60)
-        if logo_img:
-            header_row.append(logo_img)
-        else:
-            header_row.append(Paragraph('<b>LAUDO TÉCNICO</b>', h1))
-    else:
-        header_row.append(Paragraph('<b>LAUDO TÉCNICO</b>', h1))
-
     date_str = ''
     if header_data.get('date'):
         try:
@@ -1588,46 +1610,62 @@ def _gerar_pdf_laudo(payload):
         except Exception:
             date_str = header_data.get('date', '')
 
-    right_text = f"<b>Relatório de Inspeção</b><br/><font size=7 color='#6b7280'>Ref: {model_name} | Data: {date_str} | Téc: {technician}</font>"
-    header_row.append(Paragraph(right_text, body))
+    left_cell = None
+    if logo:
+        left_cell = _img_from_data_uri(logo, max_w=130, max_h=55)
+    if not left_cell:
+        left_cell = Paragraph('<b>BioDron</b>', h1)
 
-    t = Table([header_row], colWidths=[80*mm, 100*mm])
+    right_text = (f"<b><font size=15 color='#1e293b'>RELATÓRIO DE INSPEÇÃO</font></b><br/>"
+                  f"<font size=8 color='#6b7280'>Ref.: {model_name or '-'}<br/>"
+                  f"Data: {date_str or '-'} &nbsp;|&nbsp; Téc.: {technician or '-'}</font>")
+    header_row = [left_cell, Paragraph(right_text, ParagraphStyle('hr', parent=body, alignment=2))]
+
+    t = Table([header_row], colWidths=[75*mm, 105*mm])
     t.setStyle(TableStyle([
         ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-        ('LINEBELOW', (0,0), (-1,-1), 1.5, colors.black),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 8),
         ('ALIGN', (1,0), (1,0), 'RIGHT'),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 6),
     ]))
     story.append(t)
-    story.append(Spacer(1, 4*mm))
+    # Linha colorida sob o cabeçalho
+    rule = Table([['']], colWidths=[180*mm], rowHeights=[2])
+    rule.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,-1), C_PRIMARY)]))
+    story.append(rule)
+    story.append(Spacer(1, 5*mm))
 
     # ---- Informações Gerais ----
-    story.append(Paragraph('INFORMAÇÕES GERAIS', h2))
+    story.append(secao('Informações Gerais'))
+    story.append(Spacer(1, 2*mm))
     info_rows = []
     for f in header_config:
         label = f.get('label', '')
         val = header_data.get(f.get('id', ''), '') or '-'
-        info_rows.append([Paragraph(f"<b>{label}:</b>", body), Paragraph(str(val).replace('\n', '<br/>'), body)])
+        info_rows.append([Paragraph(f"<b>{label}</b>", body), Paragraph(str(val).replace('\n', '<br/>'), body)])
     if info_rows:
-        info_table = Table(info_rows, colWidths=[60*mm, 120*mm])
-        info_table.setStyle(TableStyle([
-            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#cbd5e1')),
-            ('BACKGROUND', (0,0), (0,-1), colors.HexColor('#f3f4f6')),
+        info_table = Table(info_rows, colWidths=[55*mm, 125*mm])
+        info_style = [
+            ('LINEBELOW', (0,0), (-1,-1), 0.4, C_BORDER),
+            ('BACKGROUND', (0,0), (0,-1), C_LIGHT),
             ('VALIGN', (0,0), (-1,-1), 'TOP'),
-            ('PADDING', (0,0), (-1,-1), 4),
-        ]))
+            ('TOPPADDING', (0,0), (-1,-1), 5),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 5),
+            ('LEFTPADDING', (0,0), (-1,-1), 8),
+        ]
+        info_table.setStyle(TableStyle(info_style))
         story.append(info_table)
-    story.append(Spacer(1, 4*mm))
+    story.append(Spacer(1, 5*mm))
+
+    def _esc(s):
+        return (str(s) if s is not None else '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br/>')
 
     # ---- Checklist ----
     if questions:
-        story.append(Paragraph('RESULTADOS DA INSPEÇÃO FÍSICA', h2))
-        item_label = ParagraphStyle('item_label', parent=body, fontSize=9, leading=11, leftIndent=0, spaceAfter=2, fontName='Helvetica-Bold')
-        item_status_ok = ParagraphStyle('item_ok', parent=body, fontSize=8, leading=10, leftIndent=12, textColor=colors.HexColor('#6b7280'), spaceAfter=6)
-        item_status_anormal = ParagraphStyle('item_anormal', parent=body, fontSize=9, leading=11, leftIndent=12, textColor=colors.black, spaceAfter=6)
-
-        def _esc(s):
-            return (str(s) if s is not None else '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br/>')
+        story.append(secao('Resultados da Inspeção Física'))
+        story.append(Spacer(1, 2*mm))
+        item_label = ParagraphStyle('item_label', parent=body, fontSize=9.5, leading=12, spaceAfter=1, fontName='Helvetica-Bold')
+        item_status_ok = ParagraphStyle('item_ok', parent=body, fontSize=8.5, leading=11, leftIndent=14, textColor=C_MUTED, spaceAfter=7)
+        item_status_anormal = ParagraphStyle('item_anormal', parent=body, fontSize=9, leading=12, leftIndent=14, textColor=C_DARK, spaceAfter=7)
 
         for q in questions:
             ans = answers.get(q.get('id'), {}) or {}
@@ -1648,12 +1686,13 @@ def _gerar_pdf_laudo(payload):
             else:
                 status = 'Não Constatado'
 
-            # Cada item é um Paragraph separado — ReportLab divide entre páginas automaticamente
-            marker = '⚠' if anormal else '✓'
-            story.append(Paragraph(f"{marker} {_esc(q.get('label',''))}", item_label))
+            # Marcador colorido: vermelho pra anormal, verde pra ok
+            cor = '#dc2626' if anormal else '#16a34a'
+            marker = '&#9888;' if anormal else '&#10003;'  # ⚠ / ✓
+            story.append(Paragraph(f'<font color="{cor}">{marker}</font> {_esc(q.get("label",""))}', item_label))
             style = item_status_anormal if anormal else item_status_ok
             story.append(Paragraph(_esc(status), style))
-        story.append(Spacer(1, 4*mm))
+        story.append(Spacer(1, 5*mm))
 
     # ---- Análise de Células ----
     cell_analysis = payload.get('cellAnalysis')  # { enabled, numCells, maxDropV }
@@ -1689,33 +1728,54 @@ def _gerar_pdf_laudo(payload):
                     bal_label, bal_hex = 'Totalmente Desbalanceada', '#991b1b'
 
                 story.append(PageBreak())
-                story.append(Paragraph('ANÁLISE DE CÉLULAS', h2))
+                story.append(secao('Análise de Células'))
+                story.append(Spacer(1, 3*mm))
 
-                # Resumo
-                resumo_data = [
-                    [Paragraph('<b>Resumo</b>', body), ''],
-                    ['Células avaliadas', f"{len(vals)} de {num_cells}"],
-                    ['Tensão total', f"{total:.3f} V"],
-                    ['Tensão média', f"{avg:.3f} V"],
-                    ['Tensão máxima', f"{vmax:.3f} V"],
-                    ['Tensão mínima', f"{vmin:.3f} V"],
-                    ['Voltage Drop', f"{drop:.3f} V"],
-                    ['Limite configurado', f"{max_drop:.3f} V"],
-                    ['Status', Paragraph(f'<b><font color="{bal_hex}">{bal_label}</font></b>', body)],
+                # Cartão de Resumo (com zebra) + Cartão de Status grande lado a lado
+                resumo_pairs = [
+                    ('Células avaliadas', f"{len(vals)} de {num_cells}"),
+                    ('Tensão total', f"{total:.3f} V"),
+                    ('Tensão média', f"{avg:.3f} V"),
+                    ('Tensão máxima', f"{vmax:.3f} V"),
+                    ('Tensão mínima', f"{vmin:.3f} V"),
+                    ('Voltage Drop', f"{drop:.3f} V"),
+                    ('Limite configurado', f"{max_drop:.3f} V"),
                 ]
-                resumo_table = Table(resumo_data, colWidths=[55*mm, 55*mm])
-                resumo_table.setStyle(TableStyle([
-                    ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#cbd5e1')),
-                    ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1e293b')),
-                    ('TEXTCOLOR', (0,0), (-1,0), colors.white),
-                    ('SPAN', (0,0), (1,0)),
-                    ('PADDING', (0,0), (-1,-1), 4),
-                ]))
-                story.append(resumo_table)
-                story.append(Spacer(1, 4*mm))
+                resumo_rows = [[Paragraph(f'<b>{k}</b>', small), Paragraph(f'<font name="Helvetica-Bold">{v}</font>', body)] for k, v in resumo_pairs]
+                resumo_table = Table(resumo_rows, colWidths=[45*mm, 40*mm])
+                rstyle = [
+                    ('LINEBELOW', (0,0), (-1,-1), 0.3, C_BORDER),
+                    ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                    ('TOPPADDING', (0,0), (-1,-1), 4),
+                    ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+                    ('LEFTPADDING', (0,0), (-1,-1), 6),
+                ]
+                for ri in range(len(resumo_rows)):
+                    if ri % 2 == 1:
+                        rstyle.append(('BACKGROUND', (0,ri), (-1,ri), C_LIGHT))
+                resumo_table.setStyle(TableStyle(rstyle))
 
-                # Tabela de células
-                rows = [[Paragraph('<b>Célula</b>', body), Paragraph('<b>Tensão (V)</b>', body), Paragraph('<b>Desvio Médio</b>', body), Paragraph('<b>Status</b>', body)]]
+                status_card = Table([
+                    [Paragraph('<font color="#6b7280" size=8>STATUS DE BALANCEAMENTO</font>', small)],
+                    [Paragraph(f'<b><font color="{bal_hex}" size=15>{bal_label}</font></b>', body)],
+                    [Paragraph(f'<font color="#6b7280" size=8>Voltage drop {drop:.3f}V (limite {max_drop:.3f}V)</font>', small)],
+                ], colWidths=[80*mm])
+                status_card.setStyle(TableStyle([
+                    ('BACKGROUND', (0,0), (-1,-1), C_LIGHT),
+                    ('BOX', (0,0), (-1,-1), 1.2, colors.HexColor(bal_hex)),
+                    ('TOPPADDING', (0,0), (-1,-1), 6),
+                    ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+                    ('LEFTPADDING', (0,0), (-1,-1), 12),
+                ]))
+
+                combo = Table([[resumo_table, status_card]], colWidths=[90*mm, 90*mm])
+                combo.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP')]))
+                story.append(combo)
+                story.append(Spacer(1, 5*mm))
+
+                # Tabela de células com zebra + status colorido
+                rows = [['Célula', 'Tensão (V)', 'Desvio Médio', 'Status']]
+                row_colors = []
                 for i in range(num_cells):
                     raw = cell_voltages_list[i] if i < len(cell_voltages_list) else ''
                     try:
@@ -1724,20 +1784,35 @@ def _gerar_pdf_laudo(payload):
                         v = None
                     if v is None or v <= 0:
                         rows.append([str(i+1), '—', '—', '—'])
+                        row_colors.append(None)
                     else:
                         dev = v - avg
-                        status_txt = '▲ Maior' if v == vmax and len(vals) > 1 else ('▼ Menor' if v == vmin and len(vals) > 1 else '● Normal')
+                        is_max = v == vmax and len(vals) > 1
+                        is_min = v == vmin and len(vals) > 1
+                        status_txt = '▲ Maior' if is_max else ('▼ Menor' if is_min else '● Normal')
                         dev_str = f"{'+' if dev >= 0 else ''}{dev:.3f}"
                         rows.append([str(i+1), f"{v:.3f}", dev_str, status_txt])
-                cells_table = Table(rows, colWidths=[20*mm, 35*mm, 35*mm, 35*mm])
-                cells_table.setStyle(TableStyle([
-                    ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#cbd5e1')),
-                    ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1e293b')),
+                        row_colors.append('#1d4ed8' if is_max else ('#c2410c' if is_min else None))
+                cells_table = Table(rows, colWidths=[22*mm, 38*mm, 38*mm, 38*mm], repeatRows=1)
+                cstyle = [
+                    ('BACKGROUND', (0,0), (-1,0), C_DARK),
                     ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+                    ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
                     ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-                    ('FONTSIZE', (0,1), (-1,-1), 9),
-                    ('PADDING', (0,0), (-1,-1), 3),
-                ]))
+                    ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                    ('FONTSIZE', (0,0), (-1,-1), 9),
+                    ('TOPPADDING', (0,0), (-1,-1), 4),
+                    ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+                    ('LINEBELOW', (0,0), (-1,-1), 0.3, C_BORDER),
+                ]
+                for ri in range(1, len(rows)):
+                    if ri % 2 == 0:
+                        cstyle.append(('BACKGROUND', (0,ri), (-1,ri), C_LIGHT))
+                    rc = row_colors[ri-1]
+                    if rc:
+                        cstyle.append(('TEXTCOLOR', (3,ri), (3,ri), colors.HexColor(rc)))
+                        cstyle.append(('FONTNAME', (3,ri), (3,ri), 'Helvetica-Bold'))
+                cells_table.setStyle(TableStyle(cstyle))
                 story.append(cells_table)
                 story.append(Spacer(1, 4*mm))
         except Exception as e:
@@ -1745,7 +1820,8 @@ def _gerar_pdf_laudo(payload):
 
     # ---- Diagramas com marcações ----
     if diagrams:
-        story.append(Paragraph('MAPEAMENTO VISUAL', h2))
+        story.append(secao('Mapeamento Visual'))
+        story.append(Spacer(1, 2*mm))
         diag_imgs = []
         for d in diagrams:
             base = d.get('imageBase64')
@@ -1800,7 +1876,8 @@ def _gerar_pdf_laudo(payload):
     # ---- Fotos ----
     if report_images:
         story.append(PageBreak())
-        story.append(Paragraph('EVIDÊNCIAS FOTOGRÁFICAS', h2))
+        story.append(secao('Evidências Fotográficas'))
+        story.append(Spacer(1, 2*mm))
         photo_rows = []
         row = []
         for idx, img_info in enumerate(report_images):
@@ -1809,8 +1886,14 @@ def _gerar_pdf_laudo(payload):
             img = _img_from_data_uri(src, max_w=80*mm, max_h=70*mm)
             if not img:
                 continue
-            cell = Table([[img], [Paragraph(cap, small)]], colWidths=[85*mm])
-            cell.setStyle(TableStyle([('ALIGN', (0,0), (-1,-1), 'CENTER'), ('PADDING', (0,0), (-1,-1), 2)]))
+            cell = Table([[img], [Paragraph(f'<b>{_esc(cap)}</b>', small)]], colWidths=[85*mm])
+            cell.setStyle(TableStyle([
+                ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                ('BOX', (0,0), (0,0), 0.5, C_BORDER),
+                ('TOPPADDING', (0,0), (-1,-1), 4),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+            ]))
             row.append(cell)
             if len(row) == 2:
                 photo_rows.append(row); row = []
@@ -1838,7 +1921,7 @@ def _gerar_pdf_laudo(payload):
         ]))
         story.append(sig_table)
 
-    doc.build(story)
+    doc.build(story, onFirstPage=_on_page, onLaterPages=_on_page)
     return buf.getvalue()
 
 
