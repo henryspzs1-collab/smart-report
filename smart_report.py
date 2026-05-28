@@ -783,6 +783,49 @@ def omie_call(endpoint: str, call: str, param: dict, timeout: int = 20):
         raise OmieError("Resposta inválida do Omie", status=502)
 
 
+# Nome da categoria do Pedido de Venda usada quando as peças geram venda (cAcaoProdUtilizados="REM").
+CATEGORIA_PEDIDO_VENDA_PADRAO = "Serviços de Manutenção de Baterias, Carregadores e Componentes"
+
+
+def _norm_txt(s):
+    """Normaliza texto pra comparação: minúsculo, sem acentos, sem espaços nas pontas."""
+    import unicodedata
+    s = (s or '').strip().lower()
+    return ''.join(c for c in unicodedata.normalize('NFKD', s) if not unicodedata.combining(c))
+
+
+def get_categoria_pedido_venda_code(nome=None):
+    """Resolve o código (ex: '1.01.05') da categoria do Pedido de Venda pelo nome, no Omie.
+    Cacheado por filial. Retorna None se não encontrar."""
+    nome = nome or CATEGORIA_PEDIDO_VENDA_PADRAO
+    cache_key = 'categ_pedvenda:' + nome
+    cached = _cache_get(cache_key)
+    if cached:
+        return cached
+    alvo = _norm_txt(nome)
+    pagina = 1
+    while pagina <= 50:  # trava de segurança
+        try:
+            data = omie_call('/geral/categorias/', 'ListarCategorias', {
+                "pagina": pagina,
+                "registros_por_pagina": 100
+            })
+        except OmieNoRecords:
+            break
+        cats = data.get('categoria_cadastro') or []
+        for c in cats:
+            if _norm_txt(c.get('descricao')) == alvo:
+                codigo = c.get('codigo')
+                if codigo:
+                    _cache_set(cache_key, codigo)
+                    return codigo
+        total_paginas = int(data.get('total_de_paginas') or 1)
+        if pagina >= total_paginas or not cats:
+            break
+        pagina += 1
+    return None
+
+
 def _require_user():
     user = request.headers.get('Authorization')
     full_data = load_data()
@@ -2382,8 +2425,7 @@ def os_send(os_id):
             cod_prod = int(p.get('omieProductId') or 0)
             prod_item = {
                 "nCodProdutoPU": cod_prod,
-                "nQtdePU": float(p.get('quantity') or 1),
-                "vUnitarioPU": float(p.get('unitPrice') or 0)
+                "nQtdePU": float(p.get('quantity') or 1)
             }
             # Prioriza nIdItem salvo, senão usa o mapeado da consulta
             nid_orig = p.get('nIdItem') or existing_parts_map.get(cod_prod)
@@ -2393,8 +2435,14 @@ def os_send(os_id):
             else:
                 prod_item["cAcaoItemPU"] = "I"
             produtos_utilizados.append(prod_item)
+        # "REM" gera Pedido de Venda das peças (puxa o preço do cadastro do produto).
+        # "EST" só dava baixa de estoque sem faturar -> peças ficavam sem preço.
+        categ_pv = get_categoria_pedido_venda_code()
+        if not categ_pv:
+            return jsonify({"error": f"Categoria '{CATEGORIA_PEDIDO_VENDA_PADRAO}' não encontrada no Omie. Verifique se ela existe no cadastro de Categorias (ou limpe o cache)."}), 400
         param["produtosUtilizados"] = {
-            "cAcaoProdUtilizados": "EST",
+            "cAcaoProdUtilizados": "REM",
+            "cCodCategRem": categ_pv,
             "produtoUtilizado": produtos_utilizados
         }
 
