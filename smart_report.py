@@ -2432,10 +2432,11 @@ def os_anexar_fotos(os_id):
     if not fotos:
         return jsonify({"error": "Nenhuma foto fornecida"}), 400
 
-    # Cria ZIP com todas as fotos
+    # Cria ZIP com todas as fotos. Libera cada foto da memória logo após zipar (poupa RAM no plano 512MB).
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for idx, foto in enumerate(fotos, 1):
+        for idx in range(1, len(fotos) + 1):
+            foto = fotos[idx - 1]
             src = foto.get('src') or ''
             caption = (foto.get('caption') or f'foto_{idx}').strip()
             # Sanitiza nome de arquivo
@@ -2453,9 +2454,14 @@ def os_anexar_fotos(os_id):
                 img_bytes = base64.b64decode(src)
                 zf.writestr(f"{idx:02d}_{safe_name}.{ext}", img_bytes)
             except Exception:
-                continue
+                pass
+            # Libera a foto já processada
+            fotos[idx - 1] = None
+            src = None
+    fotos = None  # libera a lista inteira
 
     zip_content = zip_buf.getvalue()
+    zip_buf = None
     if not zip_content:
         return jsonify({"error": "Falha ao gerar ZIP"}), 500
 
@@ -2465,8 +2471,11 @@ def os_anexar_fotos(os_id):
     filename = f"fotos_OS_{draft.get('omieOsNumber') or os_id}.zip"
     with zipfile.ZipFile(outer, 'w', zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(filename, zip_content)
+    zip_content = None
     outer_bytes = outer.getvalue()
+    outer = None
     outer_b64 = base64.b64encode(outer_bytes).decode('utf-8')
+    outer_bytes = None
     # Omie espera MD5 da STRING base64 (não dos bytes binários)
     md5_hash = hashlib.md5(outer_b64.encode('ascii')).hexdigest()
     print(f"[ANEXAR-FOTOS] outer_size={len(outer_bytes)} b64_size={len(outer_b64)} md5={md5_hash}", flush=True)
