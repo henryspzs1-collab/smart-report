@@ -2475,14 +2475,12 @@ def os_send(os_id):
         produtos_utilizados = []
         for p in parts_validas:
             cod_prod = int(p.get('omieProductId') or 0)
-            preco_un = float(p.get('unitPrice') or 0)
+            # NOTA: o tipo produtoUtilizado do Omie NÃO tem campo de valor unitário
+            # (testados e rejeitados: nValUnitPU, nValorUnitarioPU, vUnitarioPU). O preço
+            # das peças não pode ser enviado por aqui — ver geração de Pedido de Venda separado.
             prod_item = {
                 "nCodProdutoPU": cod_prod,
-                "nQtdePU": float(p.get('quantity') or 1),
-                # Campo de valor unitário NÃO documentado. O Omie valida e rejeita nome errado
-                # ("Tag [X] não faz parte..."), então testamos um candidato por vez.
-                # Já rejeitados: nValUnitPU, nValorUnitarioPU.
-                "vUnitarioPU": preco_un,
+                "nQtdePU": float(p.get('quantity') or 1)
             }
             # Prioriza nIdItem salvo, senão usa o mapeado da consulta
             nid_orig = p.get('nIdItem') or existing_parts_map.get(cod_prod)
