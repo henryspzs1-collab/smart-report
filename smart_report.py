@@ -1151,11 +1151,11 @@ def os_importar_omie():
     servicos_omie = data.get('ServicosPrestados') or []
     produtos_omie = (data.get('produtosUtilizados') or {}).get('produtoUtilizado') or []
 
-    # Verifica se já tem rascunho linkado a essa OS
-    drafts = _user_drafts(full_data, user)
-    existing = next((d for d in drafts if d.get('omieOsId') == cab.get('nCodOS')), None)
+    # Verifica se já tem rascunho linkado a essa OS em qualquer usuário da filial
+    existing = next((d for _o, d in _all_filial_drafts(full_data, user) if d.get('omieOsId') == cab.get('nCodOS')), None)
     if existing:
         return jsonify(existing)
+    drafts = _user_drafts(full_data, user)  # importa para o próprio usuário
 
     client_name = ''
     client_doc = ''
@@ -1491,13 +1491,47 @@ def _user_drafts(full_data, user):
     return full_data['userStates'][user]['osDrafts']
 
 
+def _responsavel_nome(full_data, username):
+    """Nome amigável de um usuário (pra mostrar 'quem preencheu')."""
+    u = (full_data.get('users') or {}).get(username) or {}
+    nome = f"{u.get('firstName', '')} {u.get('lastName', '')}".strip()
+    return nome or username
+
+
+def _all_filial_drafts(full_data, requesting_user):
+    """Retorna [(owner_username, draft)] de TODOS os usuários da mesma filial do requisitante
+    (painel de controle compartilhado por filial)."""
+    users = full_data.get('users', {})
+    my_fil = (users.get(requesting_user) or {}).get('filialId') or 'matriz'
+    out = []
+    for uname, ustate in (full_data.get('userStates') or {}).items():
+        if (users.get(uname) or {}).get('filialId', 'matriz') != my_fil:
+            continue
+        for d in (ustate.get('osDrafts') or []):
+            out.append((uname, d))
+    return out
+
+
+def _find_filial_draft(full_data, requesting_user, os_id):
+    """Localiza um rascunho pelo id em qualquer usuário da filial. Retorna (owner, draft) ou (None, None)."""
+    for owner, d in _all_filial_drafts(full_data, requesting_user):
+        if d.get('id') == os_id:
+            return owner, d
+    return None, None
+
+
 @app.route('/api/os', methods=['GET'])
 def os_list():
     user, full_data, err = _require_user()
     if err:
         return err
-    drafts = _user_drafts(full_data, user)
-    return jsonify(drafts)
+    # Painel compartilhado: todas as OS da filial, com nome de quem preencheu.
+    out = []
+    for owner, d in _all_filial_drafts(full_data, user):
+        out.append({**d, "responsavel": _responsavel_nome(full_data, d.get('createdBy') or owner)})
+    # Ordena por data de criação (mais recente primeiro)
+    out.sort(key=lambda x: x.get('createdAt') or '', reverse=True)
+    return jsonify(out)
 
 
 @app.route('/api/os', methods=['POST'])
@@ -1535,19 +1569,17 @@ def os_update(os_id):
     if err:
         return err
     body = request.json or {}
-    drafts = _user_drafts(full_data, user)
-    for i, d in enumerate(drafts):
-        if d['id'] == os_id:
-            if d['status'] == 'sent':
-                return jsonify({"error": "OS já enviada não pode ser editada"}), 400
-            for k in ('client', 'services', 'parts', 'observations', 'fromLaudo'):
-                if k in body:
-                    d[k] = body[k]
-            d['updatedAt'] = datetime.utcnow().isoformat() + "Z"
-            drafts[i] = d
-            save_data(full_data)
-            return jsonify(d)
-    return jsonify({"error": "Rascunho não encontrado"}), 404
+    owner, d = _find_filial_draft(full_data, user, os_id)
+    if not d:
+        return jsonify({"error": "Rascunho não encontrado"}), 404
+    if d['status'] == 'sent':
+        return jsonify({"error": "OS já enviada não pode ser editada"}), 400
+    for k in ('client', 'services', 'parts', 'observations', 'fromLaudo'):
+        if k in body:
+            d[k] = body[k]
+    d['updatedAt'] = datetime.utcnow().isoformat() + "Z"
+    save_data(full_data)
+    return jsonify(d)
 
 
 @app.route('/api/os/<os_id>', methods=['DELETE'])
@@ -1555,9 +1587,12 @@ def os_delete(os_id):
     user, full_data, err = _require_user()
     if err:
         return err
-    drafts = _user_drafts(full_data, user)
-    full_data['userStates'][user]['osDrafts'] = [d for d in drafts if d['id'] != os_id]
-    save_data(full_data)
+    owner, d = _find_filial_draft(full_data, user, os_id)
+    if owner:
+        full_data['userStates'][owner]['osDrafts'] = [
+            x for x in full_data['userStates'][owner]['osDrafts'] if x.get('id') != os_id
+        ]
+        save_data(full_data)
     return jsonify({"success": True})
 
 
@@ -1566,10 +1601,9 @@ def os_debug(os_id):
     user, full_data, err = _require_user()
     if err:
         return err
-    drafts = _user_drafts(full_data, user)
-    draft = next((d for d in drafts if d['id'] == os_id), None)
+    owner, draft = _find_filial_draft(full_data, user, os_id)
     if not draft:
-        return jsonify({"error": "draft not found", "available_ids": [d['id'] for d in drafts]}), 404
+        return jsonify({"error": "draft not found", "available_ids": [d['id'] for _, d in _all_filial_drafts(full_data, user)]}), 404
     return jsonify({
         "draft_id": draft.get('id'),
         "omieOsId": draft.get('omieOsId'),
@@ -2257,8 +2291,7 @@ def os_gerar_pdf_anexar(os_id):
     user, full_data, err = _require_user()
     if err:
         return err
-    drafts = _user_drafts(full_data, user)
-    draft = next((d for d in drafts if d['id'] == os_id), None)
+    owner, draft = _find_filial_draft(full_data, user, os_id)
     if not draft:
         return jsonify({"error": "Rascunho não encontrado"}), 404
     if not draft.get('omieOsId'):
@@ -2317,8 +2350,7 @@ def os_anexar(os_id):
     user, full_data, err = _require_user()
     if err:
         return err
-    drafts = _user_drafts(full_data, user)
-    draft = next((d for d in drafts if d['id'] == os_id), None)
+    owner, draft = _find_filial_draft(full_data, user, os_id)
     if not draft:
         return jsonify({"error": "Rascunho não encontrado"}), 404
     if not draft.get('omieOsId'):
@@ -2374,8 +2406,7 @@ def os_anexar_fotos(os_id):
     user, full_data, err = _require_user()
     if err:
         return err
-    drafts = _user_drafts(full_data, user)
-    draft = next((d for d in drafts if d['id'] == os_id), None)
+    owner, draft = _find_filial_draft(full_data, user, os_id)
     if not draft:
         return jsonify({"error": "Rascunho não encontrado"}), 404
     if not draft.get('omieOsId'):
@@ -2530,8 +2561,7 @@ def os_send(os_id):
     user, full_data, err = _require_user()
     if err:
         return err
-    drafts = _user_drafts(full_data, user)
-    draft = next((d for d in drafts if d['id'] == os_id), None)
+    owner, draft = _find_filial_draft(full_data, user, os_id)
     if not draft:
         return jsonify({"error": "Rascunho não encontrado"}), 404
 
@@ -2780,6 +2810,7 @@ HTML_PAGE = """
             // Estados de Ordens de Serviço (Omie)
             const [osDrafts, setOsDrafts] = useState([]);
             const [currentOs, setCurrentOs] = useState(null);
+            const [osFilter, setOsFilter] = useState('todas'); // todas | pendentes | enviadas
             const [omieStatus, setOmieStatus] = useState({ checked: false, ok: false, configured: false, message: '' });
             const [omieAbertas, setOmieAbertas] = useState([]);
             const [loadingAbertas, setLoadingAbertas] = useState(false);
@@ -3059,6 +3090,10 @@ HTML_PAGE = """
                             if (data.pedidoVendaNumero) msg += `\nPedido de Venda das peças: nº ${data.pedidoVendaNumero}`;
                             if (data.warning) msg += `\n\n⚠️ ${data.warning}`;
                             alert(msg);
+                            if (confirm('OS finalizada e enviada! Deseja limpar o laudo e voltar pra lista, pra começar a próxima?')) {
+                                clearCurrentReport();
+                                setCurrentOs(null);
+                            }
                         } else {
                             setOsSendError(data.error || 'Erro ao enviar');
                         }
@@ -4901,8 +4936,8 @@ HTML_PAGE = """
                         </div>
 
                         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-                            <div className="flex justify-between items-center mb-4">
-                                <h2 className="text-xl font-semibold text-slate-800 flex items-center gap-2"><i className="ph-fill ph-clipboard-text text-indigo-600 text-2xl"></i> Minhas Ordens de Serviço</h2>
+                            <div className="flex justify-between items-center mb-4 flex-wrap gap-2">
+                                <h2 className="text-xl font-semibold text-slate-800 flex items-center gap-2"><i className="ph-fill ph-clipboard-text text-indigo-600 text-2xl"></i> Ordens de Serviço da Filial</h2>
                                 <button onClick=${() => createNewOs()} className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded font-medium flex items-center gap-1"><i className="ph-bold ph-plus"></i> Nova OS</button>
                             </div>
                             ${osDrafts.length === 0 ? html`
@@ -4911,12 +4946,18 @@ HTML_PAGE = """
                                     <p className="mt-2">Nenhuma OS criada ainda. Clique em "Nova OS" ou gere uma a partir de um laudo.</p>
                                 </div>
                             ` : html`
+                                <div className="flex gap-2 mb-3 text-sm">
+                                    ${[['todas','Todas',osDrafts.length],['pendentes','Pendentes',osDrafts.filter(o=>o.status!=='sent').length],['enviadas','Enviadas',osDrafts.filter(o=>o.status==='sent').length]].map(([key,label,count]) => html`
+                                        <button key=${key} onClick=${() => setOsFilter(key)} className=${`px-3 py-1.5 rounded-full font-medium border ${osFilter===key ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'}`}>${label} <span className=${`ml-1 px-1.5 rounded-full text-xs ${osFilter===key?'bg-white/25':'bg-slate-200 text-slate-700'}`}>${count}</span></button>
+                                    `)}
+                                </div>
                                 <div className="overflow-x-auto">
                                     <table className="min-w-full text-sm">
                                         <thead className="bg-slate-100 text-slate-700">
                                             <tr>
                                                 <th className="p-3 text-left">Data</th>
                                                 <th className="p-3 text-left">Cliente</th>
+                                                <th className="p-3 text-left">Responsável</th>
                                                 <th className="p-3 text-center">Itens</th>
                                                 <th className="p-3 text-right">Total</th>
                                                 <th className="p-3 text-center">Status</th>
@@ -4924,16 +4965,17 @@ HTML_PAGE = """
                                             </tr>
                                         </thead>
                                         <tbody className="divide-y divide-slate-100">
-                                            ${osDrafts.slice().reverse().map(o => html`
+                                            ${osDrafts.filter(o => osFilter==='todas' || (osFilter==='enviadas' && o.status==='sent') || (osFilter==='pendentes' && o.status!=='sent')).map(o => html`
                                                 <tr key=${o.id} className="hover:bg-slate-50">
-                                                    <td className="p-3 text-xs">${new Date(o.createdAt).toLocaleString('pt-BR')}</td>
+                                                    <td className="p-3 text-xs">${new Date(o.createdAt).toLocaleString('pt-BR')}${o.sentAt ? html`<div className="text-green-600">enviada ${new Date(o.sentAt).toLocaleString('pt-BR')}</div>` : ''}</td>
                                                     <td className="p-3">${o.client?.name || '(sem cliente)'}</td>
+                                                    <td className="p-3 text-xs text-slate-600">${o.responsavel || '-'}</td>
                                                     <td className="p-3 text-center text-xs">${(o.services||[]).length} serv. / ${(o.parts||[]).length} peças</td>
                                                     <td className="p-3 text-right font-bold">R$ ${osTotal(o).toFixed(2)}</td>
                                                     <td className="p-3 text-center">
                                                         ${o.status === 'sent' ? html`<span className="bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs font-bold">ENVIADA #${o.omieOsNumber || o.omieOsId}</span>` :
                                                           o.sendError ? html`<span className="bg-red-100 text-red-700 px-2 py-0.5 rounded text-xs font-bold" title=${o.sendError}>ERRO</span>` :
-                                                          html`<span className="bg-slate-200 text-slate-700 px-2 py-0.5 rounded text-xs font-bold">RASCUNHO</span>`}
+                                                          html`<span className="bg-amber-100 text-amber-700 px-2 py-0.5 rounded text-xs font-bold">PENDENTE</span>`}
                                                     </td>
                                                     <td className="p-3 text-right whitespace-nowrap">
                                                         <button onClick=${() => setCurrentOs(o)} className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-2 py-1 rounded text-xs font-medium mr-1">${o.status === 'sent' ? 'Ver' : 'Editar'}</button>
