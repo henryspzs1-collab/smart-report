@@ -2451,12 +2451,9 @@ def os_send(os_id):
             prod_item = {
                 "nCodProdutoPU": cod_prod,
                 "nQtdePU": float(p.get('quantity') or 1),
-                # Campo de valor unitário é NÃO documentado pela Omie. Mandamos vários nomes
-                # candidatos (campos desconhecidos são ignorados) e a tela "Conferir" confirma qual pegou.
+                # Campo de valor unitário NÃO documentado. O Omie valida e rejeita nome errado
+                # ("Tag [X] não faz parte..."), então testamos um candidato por vez.
                 "nValorUnitarioPU": preco_un,
-                "vUnitarioPU": preco_un,
-                "nValUnitPU": preco_un,
-                "valorUnitarioPU": preco_un,
             }
             # Prioriza nIdItem salvo, senão usa o mapeado da consulta
             nid_orig = p.get('nIdItem') or existing_parts_map.get(cod_prod)
