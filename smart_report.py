@@ -1500,6 +1500,87 @@ def omie_cache_info():
     return jsonify({"entries": info, "ttl_seconds": OMIE_CACHE_TTL, "path": _omie_cache_path()})
 
 
+@app.route('/api/omie/webhook', methods=['POST'])
+def omie_webhook():
+    """Recebe webhooks do Omie. Público (Omie chama sem header de auth). Validamos pelo appKey
+    do payload. Sempre responde 200 (pra não bagunçar a fila de webhooks do Omie). Atualiza
+    o status do rascunho correspondente quando reconhecemos o evento de OS."""
+    import sys
+    try:
+        payload = request.get_json(silent=True) or {}
+    except Exception:
+        payload = {}
+
+    topic = (payload.get('topic') or '').strip()
+    msg_id = (payload.get('messageId') or '').strip()
+    app_key = (payload.get('appKey') or '').strip()
+    event = payload.get('event') or {}
+    print(f"[OMIE-WEBHOOK] topic={topic!r} msg={msg_id!r} keys={list(event.keys())[:10]}", flush=True)
+
+    # Handshake / ping: Omie envia um ping pra validar o endpoint. Responde 200 e pronto.
+    if 'ping' in payload or topic.lower() in ('ping', 'omie.ping') or not event:
+        return jsonify({"ok": True, "pong": True})
+
+    full_data = load_data()
+
+    # Validação:
+    # 1) Se OMIE_WEBHOOK_TOKEN estiver setado, exigimos que o token bata (mais seguro).
+    #    O Omie envia o token configurado em "endpoint_token" no portal do dev.
+    expected_tok = (os.environ.get('OMIE_WEBHOOK_TOKEN') or '').strip()
+    if expected_tok:
+        got_tok = (request.headers.get('X-Omie-Webhook-Token')
+                   or payload.get('endpoint_token')
+                   or payload.get('endpointToken')
+                   or payload.get('token') or '').strip()
+        if got_tok != expected_tok:
+            print(f"[OMIE-WEBHOOK] endpoint_token invalido — ignorando", flush=True)
+            return jsonify({"ok": True, "ignored": "token"})
+    # 2) Caso não tenha token configurado, valida via appKey conhecido (fallback).
+    else:
+        if not _appkey_filial_match(full_data, app_key):
+            print(f"[OMIE-WEBHOOK] appKey desconhecido — ignorando", flush=True)
+            return jsonify({"ok": True, "ignored": "appKey desconhecido"})
+
+    # Idempotência: descarta messageId já processado (guarda os últimos 200)
+    seen = full_data.setdefault('webhooksSeen', [])
+    if msg_id and msg_id in seen:
+        return jsonify({"ok": True, "duplicate": True})
+
+    # Extrai identificadores comuns da OS
+    n_cod_os = (event.get('idOrdemServico') or event.get('nCodOS')
+                or event.get('codigo_os') or event.get('codigo_ordem_servico'))
+    c_num_os = (event.get('numeroOrdemServico') or event.get('cNumOS')
+                or event.get('numero_os') or event.get('numero_ordem_servico'))
+
+    owner, draft = _find_draft_by_omie(full_data, n_cod_os, c_num_os)
+    if not draft:
+        print(f"[OMIE-WEBHOOK] OS nao localizada (nCodOS={n_cod_os} cNumOS={c_num_os})", flush=True)
+        if msg_id:
+            seen.append(msg_id); seen[:] = seen[-200:]
+            save_data(full_data)
+        return jsonify({"ok": True, "matched": False})
+
+    # Mapeia o tópico pra um status amigável
+    tl = topic.lower()
+    if 'faturad' in tl:
+        draft['omieStatus'] = 'faturada'
+    elif 'cancel' in tl:
+        draft['omieStatus'] = 'cancelada'
+    elif 'exclu' in tl:
+        draft['omieStatus'] = 'excluida'
+    elif 'alterad' in tl or 'etapa' in tl:
+        draft['omieStatus'] = 'alterada'
+    else:
+        draft['omieStatus'] = topic or 'evento'
+    draft['omieTopic'] = topic
+    draft['omieEventAt'] = datetime.utcnow().isoformat() + "Z"
+
+    if msg_id:
+        seen.append(msg_id); seen[:] = seen[-200:]
+    save_data(full_data)
+    return jsonify({"ok": True, "matched": True, "status": draft['omieStatus']})
+
+
 @app.route('/api/omie/status', methods=['GET'])
 def omie_status():
     """Verifica se as credenciais estão configuradas e se conseguimos chamar o Omie."""
@@ -1744,6 +1825,31 @@ def _find_filial_draft(full_data, requesting_user, os_id):
         if d.get('id') == os_id:
             return owner, d
     return None, None
+
+
+def _find_draft_by_omie(full_data, n_cod_os=None, c_num_os=None):
+    """Localiza um rascunho pelo nCodOS ou cNumOS do Omie, em QUALQUER usuário (uso interno: webhook)."""
+    n_cod_os = int(n_cod_os) if (n_cod_os not in (None, '')) else None
+    c_num_os = str(c_num_os) if (c_num_os not in (None, '')) else None
+    for uname, ustate in (full_data.get('userStates') or {}).items():
+        for d in (ustate.get('osDrafts') or []):
+            if n_cod_os is not None and d.get('omieOsId') == n_cod_os:
+                return uname, d
+            if c_num_os is not None and str(d.get('omieOsNumber') or '') == c_num_os:
+                return uname, d
+    return None, None
+
+
+def _appkey_filial_match(full_data, app_key):
+    """Verifica se o appKey do webhook bate com alguma filial (matriz usa env)."""
+    if not app_key:
+        return None
+    env_key = os.environ.get('OMIE_APP_KEY') or ''
+    for fid, f in (full_data.get('filiais') or {}).items():
+        fkey = (f.get('omieAppKey') or '').strip() or env_key
+        if fkey and fkey == app_key:
+            return fid
+    return None
 
 
 @app.route('/api/os', methods=['GET'])
@@ -5244,6 +5350,7 @@ HTML_PAGE = """
                                                         ${o.status === 'sent' ? html`<span className="bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs font-bold">ENVIADA #${o.omieOsNumber || o.omieOsId}</span>` :
                                                           o.sendError ? html`<span className="bg-red-100 text-red-700 px-2 py-0.5 rounded text-xs font-bold" title=${o.sendError}>ERRO</span>` :
                                                           html`<span className="bg-amber-100 text-amber-700 px-2 py-0.5 rounded text-xs font-bold">PENDENTE</span>`}
+                                                        ${o.omieStatus ? html`<div className=${`mt-1 text-xs font-bold rounded px-2 py-0.5 inline-block ${o.omieStatus === 'faturada' ? 'bg-emerald-100 text-emerald-700' : (o.omieStatus === 'cancelada' || o.omieStatus === 'excluida') ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'}`} title=${o.omieEventAt ? 'Omie em ' + new Date(o.omieEventAt).toLocaleString('pt-BR') : ''}>Omie: ${o.omieStatus}</div>` : ''}
                                                     </td>
                                                     <td className="p-3 text-right whitespace-nowrap">
                                                         <button onClick=${() => setCurrentOs(o)} className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-2 py-1 rounded text-xs font-medium mr-1">${o.status === 'sent' ? 'Ver' : 'Editar'}</button>
