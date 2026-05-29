@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: standard
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn smart_report:app --workers 1 --threads 4 --worker-class gthread --timeout 120 --max-requests 120 --max-requests-jitter 20
+    startCommand: gunicorn smart_report:app --workers 1 --timeout 120 --max-requests 300 --max-requests-jitter 50
     envVars:
       - key: DATA_FILE
         value: /data/bateria_data.json

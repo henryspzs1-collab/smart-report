@@ -209,8 +209,14 @@ def load_data():
 
 
 def save_data(data):
-    with open(DATA_FILE, 'w', encoding='utf-8') as f:
+    # Gravação atômica: escreve num temp e troca (os.replace). Assim um leitor nunca
+    # pega o arquivo pela metade (que causava lista vazia intermitente).
+    tmp = DATA_FILE + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, DATA_FILE)
 
 
 @app.route('/api/login', methods=['POST'])
