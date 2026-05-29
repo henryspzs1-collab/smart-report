@@ -2481,7 +2481,8 @@ def os_send(os_id):
                 "nQtdePU": float(p.get('quantity') or 1),
                 # Campo de valor unitário NÃO documentado. O Omie valida e rejeita nome errado
                 # ("Tag [X] não faz parte..."), então testamos um candidato por vez.
-                "nValorUnitarioPU": preco_un,
+                # Já rejeitados: nValUnitPU, nValorUnitarioPU.
+                "vUnitarioPU": preco_un,
             }
             # Prioriza nIdItem salvo, senão usa o mapeado da consulta
             nid_orig = p.get('nIdItem') or existing_parts_map.get(cod_prod)
