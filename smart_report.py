@@ -897,10 +897,15 @@ def omie_debug_os():
         return jsonify({"error": "Não autorizado. Use ?token=SEU_USUARIO (precisa ser admin)."}), 401
     _set_omie_context(full_data, token)
     nCodOS = request.args.get('nCodOS')
-    if not nCodOS:
-        return jsonify({"error": "Informe ?nCodOS=390"}), 400
+    cNumOS = request.args.get('cNumOS') or request.args.get('num')
+    if nCodOS:
+        consulta_param = {"nCodOS": int(nCodOS)}
+    elif cNumOS:
+        consulta_param = {"cNumOS": str(cNumOS)}
+    else:
+        return jsonify({"error": "Informe ?cNumOS=390 (número da OS) ou ?nCodOS= (código interno)"}), 400
     try:
-        data = omie_call('/servicos/os/', 'ConsultarOS', {"nCodOS": int(nCodOS)})
+        data = omie_call('/servicos/os/', 'ConsultarOS', consulta_param)
         return jsonify(data)
     except OmieError as e:
         return jsonify({"error": str(e)}), e.status
