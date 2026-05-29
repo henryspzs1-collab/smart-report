@@ -2445,6 +2445,86 @@ def os_anexar_fotos(os_id):
         return jsonify({"error": str(e)}), e.status
 
 
+def _criar_ou_atualizar_pedido_venda(draft, parts_validas, nCodCC):
+    """Cria (ou atualiza, se já existir) um Pedido de Venda no Omie com as peças + preços.
+    Pagamento à vista, mesma categoria do Orçamento. Atualiza draft['pedidoVendaId/Numero'].
+    Lança OmieError em caso de falha."""
+    # Agrupa peças por produto (soma qtd, mantém maior preço informado)
+    agrup = {}
+    ordem = []
+    for p in parts_validas:
+        cod = int(p.get('omieProductId') or 0)
+        if cod == 0:
+            continue
+        if cod not in agrup:
+            agrup[cod] = {"quantidade": 0.0, "valor_unitario": 0.0}
+            ordem.append(cod)
+        agrup[cod]["quantidade"] += float(p.get('quantity') or 1)
+        pu = float(p.get('unitPrice') or 0)
+        if pu > agrup[cod]["valor_unitario"]:
+            agrup[cod]["valor_unitario"] = pu
+    if not ordem:
+        return
+
+    cli = draft.get('client') or {}
+    categ_pv = get_categoria_pedido_venda_code()
+    det = []
+    for cod in ordem:
+        info = agrup[cod]
+        det.append({
+            "ide": {"codigo_item_integracao": f"{draft['id']}-{cod}"[:60]},
+            "produto": {
+                "codigo_produto": cod,
+                "quantidade": info["quantidade"],
+                "valor_unitario": info["valor_unitario"]
+            }
+        })
+
+    cabecalho = {
+        "codigo_cliente": int(cli.get('omieClientId')),
+        "codigo_pedido_integracao": f"sr-{draft['id']}"[:60],
+        "data_previsao": datetime.utcnow().strftime("%d/%m/%Y"),
+        "etapa": "10",
+        "codigo_parcela": "000",  # à vista
+        "quantidade_itens": len(det)
+    }
+    info_ad = {
+        "codigo_conta_corrente": int(nCodCC),
+        "consumidor_final": "S",
+        "enviar_email": "N"
+    }
+    if categ_pv:
+        info_ad["codigo_categoria"] = categ_pv
+
+    ped_id = draft.get('pedidoVendaId')
+    if ped_id:
+        cabecalho["codigo_pedido"] = int(ped_id)
+        result = omie_call('/produtos/pedido/', 'AlterarPedidoVenda',
+                           {"cabecalho": cabecalho, "det": det, "informacoes_adicionais": info_ad})
+    else:
+        try:
+            result = omie_call('/produtos/pedido/', 'IncluirPedido',
+                               {"cabecalho": cabecalho, "det": det, "informacoes_adicionais": info_ad})
+        except OmieError as e:
+            # Já existe um pedido com esse código de integração: consulta e altera
+            if 'cadastrad' in str(e).lower():
+                cons = omie_call('/produtos/pedido/', 'ConsultarPedido',
+                                 {"codigo_pedido_integracao": cabecalho["codigo_pedido_integracao"]})
+                nped = ((cons.get('pedido_venda_produto') or {}).get('cabecalho') or {}).get('codigo_pedido')
+                if not nped:
+                    raise
+                cabecalho["codigo_pedido"] = int(nped)
+                result = omie_call('/produtos/pedido/', 'AlterarPedidoVenda',
+                                   {"cabecalho": cabecalho, "det": det, "informacoes_adicionais": info_ad})
+            else:
+                raise
+
+    if result.get('codigo_pedido'):
+        draft['pedidoVendaId'] = result.get('codigo_pedido')
+    if result.get('numero_pedido'):
+        draft['pedidoVendaNumero'] = result.get('numero_pedido')
+
+
 @app.route('/api/os/<os_id>/send', methods=['POST'])
 def os_send(os_id):
     user, full_data, err = _require_user()
@@ -2569,60 +2649,9 @@ def os_send(os_id):
     print(f"[OS-SEND] PAYLOAD: {json.dumps(param, ensure_ascii=False)[:1200]}", flush=True)
     sys.stdout.flush()
 
-    # Adiciona peças como "produtosUtilizados" (saída de estoque)
+    # As peças NÃO vão como "produtos utilizados" da OS (a API não aceita preço nelas).
+    # Elas vão num Pedido de Venda separado, criado/atualizado logo após o envio da OS.
     parts_validas = [p for p in (draft.get('parts') or []) if p.get('omieProductId')]
-    if parts_validas:
-        # Se é update, consulta as peças atuais no Omie pra mapear nIdItemPU por produto
-        existing_parts_map = {}  # nCodProdutoPU -> nIdItemPU
-        if is_update:
-            try:
-                consulta = omie_call('/servicos/os/', 'ConsultarOS', {"nCodOS": int(draft['omieOsId'])})
-                prod_omie = (consulta.get('produtosUtilizados') or {}).get('produtoUtilizado') or []
-                for po in prod_omie:
-                    cod = po.get('nCodProdutoPU')
-                    nid = po.get('nIdItemPU') or po.get('nIdItem')
-                    if cod and nid:
-                        existing_parts_map[int(cod)] = int(nid)
-            except OmieError:
-                pass
-
-        # Agrupa peças repetidas (mesmo produto) somando a quantidade, pra evitar o erro
-        # "produto já cadastrado para o mesmo local de estoque" quando há linhas duplicadas.
-        agrupadas = {}
-        ordem = []
-        for p in parts_validas:
-            cod_prod = int(p.get('omieProductId') or 0)
-            if cod_prod not in agrupadas:
-                agrupadas[cod_prod] = {"quantity": 0.0, "nIdItem": p.get('nIdItem')}
-                ordem.append(cod_prod)
-            agrupadas[cod_prod]["quantity"] += float(p.get('quantity') or 1)
-            if not agrupadas[cod_prod]["nIdItem"] and p.get('nIdItem'):
-                agrupadas[cod_prod]["nIdItem"] = p.get('nIdItem')
-
-        produtos_utilizados = []
-        for cod_prod in ordem:
-            info = agrupadas[cod_prod]
-            # NOTA: o tipo produtoUtilizado do Omie NÃO tem campo de valor unitário
-            # (testados e rejeitados: nValUnitPU, nValorUnitarioPU, vUnitarioPU). O preço
-            # das peças vai pro cliente pela página de Orçamento do PDF.
-            prod_item = {
-                "nCodProdutoPU": cod_prod,
-                "nQtdePU": info["quantity"]
-            }
-            # Prioriza nIdItem salvo, senão usa o mapeado da consulta
-            nid_orig = info["nIdItem"] or existing_parts_map.get(cod_prod)
-            if nid_orig:
-                prod_item["nIdItemPU"] = int(nid_orig)
-                prod_item["cAcaoItemPU"] = "A"
-            else:
-                prod_item["cAcaoItemPU"] = "I"
-            produtos_utilizados.append(prod_item)
-        # "EST" = saída de estoque: registra a peça e baixa o estoque, SEM bloquear o
-        # faturamento (o "PED" exigia preço por peça, que a API não aceita).
-        param["produtosUtilizados"] = {
-            "cAcaoProdUtilizados": "EST",
-            "produtoUtilizado": produtos_utilizados
-        }
 
     try:
         call_name = 'AlterarOS' if is_update else 'IncluirOS'
@@ -2633,12 +2662,23 @@ def os_send(os_id):
             draft['omieOsNumber'] = result.get('cNumOS')
         draft['sentAt'] = datetime.utcnow().isoformat() + "Z"
         draft['sendError'] = None
-        save_data(full_data)
-        return jsonify(draft)
     except OmieError as e:
         draft['sendError'] = str(e)
         save_data(full_data)
         return jsonify({"error": str(e)}), e.status
+
+    # Cria/atualiza o Pedido de Venda das peças (preço + à vista + categoria).
+    draft['pedidoVendaError'] = None
+    if parts_validas:
+        try:
+            _criar_ou_atualizar_pedido_venda(draft, parts_validas, draft.get('nCodCCFromOmie') or nCodCC)
+        except OmieError as e:
+            draft['pedidoVendaError'] = str(e)
+
+    save_data(full_data)
+    if draft.get('pedidoVendaError'):
+        return jsonify({**draft, "warning": f"OS enviada, mas falhou ao gerar o Pedido de Venda das peças: {draft['pedidoVendaError']}"})
+    return jsonify(draft)
 
 
 HTML_PAGE = """
@@ -3015,7 +3055,10 @@ HTML_PAGE = """
                         if (data.id && data.status === 'sent') {
                             setCurrentOs(data);
                             fetchOsDrafts();
-                            alert(`OS atualizada no Omie! Número: ${data.omieOsNumber || data.omieOsId}`);
+                            let msg = `OS atualizada no Omie! Número: ${data.omieOsNumber || data.omieOsId}`;
+                            if (data.pedidoVendaNumero) msg += `\nPedido de Venda das peças: nº ${data.pedidoVendaNumero}`;
+                            if (data.warning) msg += `\n\n⚠️ ${data.warning}`;
+                            alert(msg);
                         } else {
                             setOsSendError(data.error || 'Erro ao enviar');
                         }
