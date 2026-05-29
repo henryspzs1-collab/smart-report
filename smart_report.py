@@ -887,6 +887,25 @@ def omie_debug_listaros():
         return jsonify({"error": str(e)}), e.status
 
 
+@app.route('/api/omie/debug/os', methods=['GET'])
+def omie_debug_os():
+    """DEBUG: retorna a resposta crua do ConsultarOS pra inspecionar campos.
+    Aceita token via header Authorization OU query ?token= (pra abrir no navegador). Admin only."""
+    token = request.headers.get('Authorization') or request.args.get('token')
+    full_data = load_data()
+    if not token or token not in full_data['users'] or full_data['users'][token].get('role') != 'admin':
+        return jsonify({"error": "Não autorizado. Use ?token=SEU_USUARIO (precisa ser admin)."}), 401
+    _set_omie_context(full_data, token)
+    nCodOS = request.args.get('nCodOS')
+    if not nCodOS:
+        return jsonify({"error": "Informe ?nCodOS=390"}), 400
+    try:
+        data = omie_call('/servicos/os/', 'ConsultarOS', {"nCodOS": int(nCodOS)})
+        return jsonify(data)
+    except OmieError as e:
+        return jsonify({"error": str(e)}), e.status
+
+
 @app.route('/api/omie/os/abertas', methods=['GET'])
 def omie_os_abertas():
     """Lista OSes do Omie que ainda não foram faturadas/canceladas, pra técnico importar e editar."""
