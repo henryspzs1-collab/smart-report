@@ -2129,6 +2129,104 @@ def _gerar_pdf_laudo(payload):
         ]))
         story.append(sig_table)
 
+    # ---- Página de OS / Orçamento (serviços + peças com valores) ----
+    osq = payload.get('osQuote') or {}
+    q_services = osq.get('services') or []
+    q_parts = osq.get('parts') or []
+    if q_services or q_parts:
+        def _brl(v):
+            try:
+                v = float(v or 0)
+            except Exception:
+                v = 0.0
+            return "R$ " + f"{v:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+
+        def _fmt_qty(q):
+            try:
+                q = float(q or 0)
+            except Exception:
+                q = 0.0
+            return str(int(q)) if q.is_integer() else f"{q:.2f}".replace('.', ',')
+
+        th = ParagraphStyle('th', parent=body, textColor=colors.white, fontName='Helvetica-Bold')
+        th_c = ParagraphStyle('th_c', parent=th, alignment=1)
+        th_r = ParagraphStyle('th_r', parent=th, alignment=2)
+        cell_c = ParagraphStyle('cell_c', parent=body, alignment=1)
+        cell_r = ParagraphStyle('cell_r', parent=body, alignment=2)
+        col_widths = [96*mm, 18*mm, 30*mm, 36*mm]
+
+        def _tabela_itens(label, itens):
+            data = [[Paragraph(label, th), Paragraph('Qtd', th_c), Paragraph('Valor Unit.', th_r), Paragraph('Total', th_r)]]
+            subtotal = 0.0
+            for it in itens:
+                qty = float(it.get('quantity') or 0)
+                unit = float(it.get('unitPrice') or 0)
+                tot = qty * unit
+                subtotal += tot
+                desc = (it.get('description') or it.get('code') or '—')
+                data.append([
+                    Paragraph(str(desc), body),
+                    Paragraph(_fmt_qty(qty), cell_c),
+                    Paragraph(_brl(unit), cell_r),
+                    Paragraph(_brl(tot), cell_r),
+                ])
+            t = Table(data, colWidths=col_widths, repeatRows=1)
+            st = [
+                ('BACKGROUND', (0,0), (-1,0), C_PRIMARY),
+                ('GRID', (0,0), (-1,-1), 0.4, C_BORDER),
+                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                ('TOPPADDING', (0,0), (-1,-1), 4),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+                ('LEFTPADDING', (0,0), (-1,-1), 5),
+                ('RIGHTPADDING', (0,0), (-1,-1), 5),
+            ]
+            for i in range(2, len(data), 2):
+                st.append(('BACKGROUND', (0,i), (-1,i), C_LIGHT))
+            t.setStyle(TableStyle(st))
+            return t, subtotal
+
+        story.append(PageBreak())
+        story.append(secao("Ordem de Serviço / Orçamento"))
+        story.append(Spacer(1, 6))
+
+        info_bits = []
+        if osq.get('osNumber'):
+            info_bits.append(f"<b>OS Nº:</b> {osq.get('osNumber')}")
+        if osq.get('clientName'):
+            doc_str = f" — {osq.get('clientDoc')}" if osq.get('clientDoc') else ""
+            info_bits.append(f"<b>Cliente:</b> {osq.get('clientName')}{doc_str}")
+        if osq.get('paymentTerm'):
+            info_bits.append(f"<b>Pagamento:</b> {osq.get('paymentTerm')}")
+        if osq.get('category'):
+            info_bits.append(f"<b>Categoria:</b> {osq.get('category')}")
+        if info_bits:
+            story.append(Paragraph("<br/>".join(info_bits), body))
+            story.append(Spacer(1, 8))
+
+        total_geral = 0.0
+        if q_services:
+            t, sub = _tabela_itens('Serviços', q_services)
+            total_geral += sub
+            story.append(t)
+            story.append(Spacer(1, 8))
+        if q_parts:
+            t, sub = _tabela_itens('Peças', q_parts)
+            total_geral += sub
+            story.append(t)
+            story.append(Spacer(1, 8))
+
+        tot_tbl = Table([[Paragraph('<b>TOTAL GERAL</b>', th_r), Paragraph(f"<b>{_brl(total_geral)}</b>", th_r)]],
+                        colWidths=[144*mm, 36*mm])
+        tot_tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,-1), C_DARK),
+            ('TOPPADDING', (0,0), (-1,-1), 6),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+            ('RIGHTPADDING', (0,0), (-1,-1), 8),
+        ]))
+        story.append(tot_tbl)
+        story.append(Spacer(1, 6))
+        story.append(Paragraph("Documento gerado automaticamente pelo Biodron Smart Report. Valores sujeitos a confirmação.", small))
+
     doc.build(story, onFirstPage=_on_page, onLaterPages=_on_page)
     return buf.getvalue()
 
@@ -2163,6 +2261,18 @@ def os_gerar_pdf_anexar(os_id):
         return jsonify({"error": "OS precisa estar enviada/importada do Omie."}), 400
 
     payload = request.json or {}
+    # Injeta os dados da OS (serviços + peças com valores) pra gerar a página de Orçamento no PDF.
+    if not payload.get('osQuote'):
+        cli = draft.get('client') or {}
+        payload['osQuote'] = {
+            "osNumber": draft.get('omieOsNumber') or '',
+            "clientName": cli.get('name') or '',
+            "clientDoc": cli.get('document') or '',
+            "services": draft.get('services') or [],
+            "parts": draft.get('parts') or [],
+            "paymentTerm": "À vista",
+            "category": CATEGORIA_PEDIDO_VENDA_PADRAO,
+        }
     try:
         pdf_bytes = _gerar_pdf_laudo(payload)
     except Exception as e:
@@ -3424,7 +3534,7 @@ HTML_PAGE = """
             // ---- Gera PDF no servidor (mesmo layout do anexo Omie) e baixa ----
             const _montarPayloadLaudo = () => {
                 const selectedModel = models.find(m => m.id === headerData.selectedTemplateId);
-                return {
+                const payload = {
                     headerConfig,
                     headerData,
                     answers,
@@ -3440,6 +3550,18 @@ HTML_PAGE = """
                     cellAnalysis: selectedModel ? selectedModel.cellAnalysis : null,
                     cellVoltagesList: selectedModel ? (cellVoltages[selectedModel.id] || []) : []
                 };
+                // Se há uma OS aberta com serviços/peças, inclui a página de Orçamento no PDF
+                if (currentOs && ((currentOs.services||[]).length || (currentOs.parts||[]).length)) {
+                    payload.osQuote = {
+                        osNumber: currentOs.omieOsNumber || '',
+                        clientName: (currentOs.client && currentOs.client.name) || '',
+                        clientDoc: (currentOs.client && currentOs.client.document) || '',
+                        services: currentOs.services || [],
+                        parts: currentOs.parts || [],
+                        paymentTerm: 'À vista'
+                    };
+                }
+                return payload;
             };
 
             const baixarPdfLaudo = async () => {
