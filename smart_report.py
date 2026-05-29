@@ -176,6 +176,100 @@ def _latest_backup():
     except Exception:
         return None
 
+
+# -------- Assets de laudo (fotos fora do JSON) --------
+# As fotos dos laudos salvos vão pra arquivos; no JSON fica só uma referência "asset://...".
+# O contrato externo (base64) é preservado: save externaliza, load/export reinflam.
+ASSET_DIR = os.path.join(os.path.dirname(DATA_FILE) or '.', 'laudo_assets')
+
+
+def _safe_name(s):
+    return re.sub(r'[^a-zA-Z0-9_.-]', '_', str(s))[:80]
+
+
+def _mime_ext(data_uri):
+    head = data_uri[:50]
+    if 'image/png' in head:
+        return 'image/png', 'png'
+    if 'image/webp' in head:
+        return 'image/webp', 'webp'
+    return 'image/jpeg', 'jpg'
+
+
+def _externalize_images(user, lid, state):
+    """Grava reportImages (base64) como arquivos e troca o src por 'asset://...'. Retorna cópia do state."""
+    if not isinstance(state, dict) or not isinstance(state.get('reportImages'), list):
+        return state
+    try:
+        os.makedirs(ASSET_DIR, exist_ok=True)
+    except Exception:
+        return state
+    prefix = f"{_safe_name(user)}__{_safe_name(lid)}__"
+    # Remove assets antigos deste laudo (evita órfãos ao re-salvar)
+    try:
+        for fn in os.listdir(ASSET_DIR):
+            if fn.startswith(prefix):
+                os.remove(os.path.join(ASSET_DIR, fn))
+    except Exception:
+        pass
+    new_imgs = []
+    for idx, img in enumerate(state['reportImages']):
+        src = img.get('src') if isinstance(img, dict) else None
+        if isinstance(src, str) and src.startswith('data:') and 'base64,' in src:
+            mime, ext = _mime_ext(src)
+            fn = f"{prefix}{idx}.{ext}"
+            try:
+                with open(os.path.join(ASSET_DIR, fn), 'wb') as f:
+                    f.write(base64.b64decode(src.split('base64,', 1)[1]))
+                img = {**img, "src": "asset://" + fn}
+            except Exception:
+                pass  # se falhar, mantém base64 (seguro)
+        new_imgs.append(img)
+    return {**state, "reportImages": new_imgs}
+
+
+def _inflate_images(state):
+    """Troca refs 'asset://...' de volta por data URI base64. Retorna cópia do state."""
+    if not isinstance(state, dict) or not isinstance(state.get('reportImages'), list):
+        return state
+    new_imgs = []
+    for img in state['reportImages']:
+        src = img.get('src') if isinstance(img, dict) else None
+        if isinstance(src, str) and src.startswith('asset://'):
+            fn = src[len('asset://'):]
+            mime = 'image/png' if fn.endswith('.png') else ('image/webp' if fn.endswith('.webp') else 'image/jpeg')
+            try:
+                with open(os.path.join(ASSET_DIR, fn), 'rb') as f:
+                    b64 = base64.b64encode(f.read()).decode('ascii')
+                img = {**img, "src": f"data:{mime};base64,{b64}"}
+            except Exception:
+                img = {**img, "src": ""}  # arquivo sumiu
+        new_imgs.append(img)
+    return {**state, "reportImages": new_imgs}
+
+
+def _delete_laudo_assets(user, lid):
+    prefix = f"{_safe_name(user)}__{_safe_name(lid)}__"
+    try:
+        for fn in os.listdir(ASSET_DIR):
+            if fn.startswith(prefix):
+                os.remove(os.path.join(ASSET_DIR, fn))
+    except Exception:
+        pass
+
+
+def _inflate_laudos_map(laudos):
+    """Reinfla as imagens de TODOS os laudos (pra export self-contained). Cópia, não muta."""
+    out = {}
+    for uname, ulaudos in (laudos or {}).items():
+        out[uname] = {}
+        for lid, laudo in (ulaudos or {}).items():
+            if isinstance(laudo, dict) and 'state' in laudo:
+                out[uname][lid] = {**laudo, "state": _inflate_images(laudo.get('state') or {})}
+            else:
+                out[uname][lid] = laudo
+    return out
+
 # Configuração padrão de perguntas
 DEFAULT_QUESTIONS = [
     {"id": "1", "type": "checkbox", "label": "Conector danificado ou com sinal de aquecimento"},
@@ -647,11 +741,13 @@ def manage_laudos():
         if action == 'save':
             import time
             lid = payload.get('id') or ('laudo_' + str(int(time.time() * 1000)))
+            # Externaliza as fotos pra arquivos (JSON fica enxuto)
+            state = _externalize_images(user, lid, payload.get('state', {}))
             full_data['laudos'][user][lid] = {
                 "id": lid,
                 "name": payload.get('name', 'Sem nome'),
                 "date": payload.get('date', ''),
-                "state": payload.get('state', {}),
+                "state": state,
                 "savedAt": datetime.utcnow().isoformat() + "Z"
             }
             save_data(full_data)
@@ -661,18 +757,24 @@ def manage_laudos():
             laudo = full_data['laudos'][user].get(lid)
             if not laudo:
                 return jsonify({"error": "Laudo não encontrado"}), 404
-            return jsonify(laudo)
+            # Reinfla as fotos pra base64 (contrato igual ao de antes)
+            return jsonify({**laudo, "state": _inflate_images(laudo.get('state') or {})})
         if action == 'duplicate':
-            import copy, time
+            import time
             lid = payload.get('id')
             src = full_data['laudos'][user].get(lid)
             if not src:
                 return jsonify({"error": "Laudo não encontrado"}), 404
             new_id = 'laudo_' + str(int(time.time() * 1000))
-            dup = copy.deepcopy(src)
-            dup['id'] = new_id
-            dup['name'] = src['name'] + ' (Cópia)'
-            full_data['laudos'][user][new_id] = dup
+            # Reinfla o original e re-externaliza sob o novo id (copia os arquivos de foto)
+            dup_state = _externalize_images(user, new_id, _inflate_images(src.get('state') or {}))
+            full_data['laudos'][user][new_id] = {
+                "id": new_id,
+                "name": (src.get('name') or 'Sem nome') + ' (Cópia)',
+                "date": src.get('date', ''),
+                "state": dup_state,
+                "savedAt": datetime.utcnow().isoformat() + "Z"
+            }
             save_data(full_data)
             return jsonify({"success": True, "id": new_id})
 
@@ -680,6 +782,7 @@ def manage_laudos():
         lid = (request.json or {}).get('id')
         if lid and lid in full_data['laudos'][user]:
             del full_data['laudos'][user][lid]
+            _delete_laudo_assets(user, lid)
             save_data(full_data)
         return jsonify({"success": True})
 
@@ -748,7 +851,7 @@ def export_config():
     return jsonify({
         "globalConfig": full_data.get('globalConfig', {}),
         "users": full_data.get('users', {}),  # cuidado: inclui hashes de senha
-        "laudos": full_data.get('laudos', {}),
+        "laudos": _inflate_laudos_map(full_data.get('laudos', {})),  # reinfla fotos -> backup self-contained
         "exportedAt": datetime.utcnow().isoformat() + "Z"
     })
 
