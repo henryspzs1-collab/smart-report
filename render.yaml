@@ -2,9 +2,9 @@ services:
   - type: web
     name: smart-report
     runtime: python
-    plan: starter
+    plan: standard
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn smart_report:app --workers 1 --threads 2 --worker-class gthread --timeout 120 --max-requests 80 --max-requests-jitter 20
+    startCommand: gunicorn smart_report:app --workers 1 --threads 4 --worker-class gthread --timeout 120 --max-requests 120 --max-requests-jitter 20
     envVars:
       - key: DATA_FILE
         value: /data/bateria_data.json
