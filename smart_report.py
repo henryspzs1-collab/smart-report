@@ -9,7 +9,7 @@ import io
 import zipfile
 import hashlib
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib import request as urlreq
 from urllib.error import HTTPError, URLError
 import bcrypt
@@ -49,6 +49,57 @@ def verify_password(plain: str, hashed: str) -> bool:
 def generate_temp_password(length: int = 10) -> str:
     alphabet = string.ascii_letters + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+
+# -------- Sessões (tokens aleatórios) --------
+SESSION_TTL_DAYS = 30
+
+
+def _prune_sessions(sessions):
+    cutoff = (datetime.utcnow() - timedelta(days=SESSION_TTL_DAYS)).isoformat() + "Z"
+    for t in [t for t, s in sessions.items() if (s.get('createdAt') or '') < cutoff]:
+        del sessions[t]
+
+
+def _create_session(full_data, username):
+    sessions = full_data.setdefault('sessions', {})
+    _prune_sessions(sessions)
+    token = secrets.token_urlsafe(32)
+    sessions[token] = {"username": username, "createdAt": datetime.utcnow().isoformat() + "Z"}
+    return token
+
+
+def _resolve_token(full_data, token):
+    """Token de sessão -> username. None se inválido/expirado."""
+    if not token:
+        return None
+    s = (full_data.get('sessions') or {}).get(token)
+    if not s:
+        return None
+    cutoff = (datetime.utcnow() - timedelta(days=SESSION_TTL_DAYS)).isoformat() + "Z"
+    if (s.get('createdAt') or '') < cutoff:
+        return None
+    username = s.get('username')
+    if username not in full_data.get('users', {}):
+        return None
+    return username
+
+
+# -------- Rate limit simples de login (em memória) --------
+_login_attempts = {}  # username -> [timestamps]
+
+
+def _login_blocked(username):
+    import time
+    now = time.time()
+    attempts = [t for t in _login_attempts.get(username, []) if now - t < 300]  # janela 5 min
+    _login_attempts[username] = attempts
+    return len(attempts) >= 8
+
+
+def _login_record_fail(username):
+    import time
+    _login_attempts.setdefault(username, []).append(time.time())
 
 
 EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -95,6 +146,35 @@ def ensure_user_fields(user: dict) -> dict:
 # Arquivo onde os dados serão salvos permanentemente no seu PC
 # Em produção (Render), aponte para um disco persistente via variável de ambiente DATA_FILE
 DATA_FILE = os.environ.get("DATA_FILE", "bateria_data.json")
+BACKUP_DIR = os.path.join(os.path.dirname(DATA_FILE) or '.', 'backups')
+
+
+def _backup_daily(data):
+    """No máximo 1 backup por dia, mantém os 14 mais recentes. Best-effort."""
+    try:
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        today = datetime.utcnow().strftime('%Y%m%d')
+        path = os.path.join(BACKUP_DIR, f'bateria_data_{today}.json')
+        if not os.path.exists(path):
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False)
+            files = sorted(os.path.join(BACKUP_DIR, x) for x in os.listdir(BACKUP_DIR) if x.startswith('bateria_data_'))
+            for old in files[:-14]:
+                try:
+                    os.remove(old)
+                except Exception:
+                    pass
+    except Exception as e:
+        import sys
+        print(f"[BACKUP] falhou: {e}", flush=True)
+
+
+def _latest_backup():
+    try:
+        files = sorted(os.path.join(BACKUP_DIR, x) for x in os.listdir(BACKUP_DIR) if x.startswith('bateria_data_'))
+        return files[-1] if files else None
+    except Exception:
+        return None
 
 # Configuração padrão de perguntas
 DEFAULT_QUESTIONS = [
@@ -123,8 +203,21 @@ def load_data():
         try:
             with open(DATA_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-        except:
-            pass
+        except Exception as e:
+            import sys
+            print(f"[LOAD_DATA] falha ao ler {DATA_FILE}: {e}", flush=True)
+            # NUNCA recriar do zero por cima de dados existentes (apagaria tudo).
+            # Tenta o backup mais recente; se não der, aborta.
+            bkp = _latest_backup()
+            if bkp:
+                try:
+                    with open(bkp, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    print(f"[LOAD_DATA] recuperado do backup {bkp}", flush=True)
+                except Exception:
+                    raise RuntimeError("Dados corrompidos e backup ilegível")
+            else:
+                raise RuntimeError("Dados corrompidos e sem backup disponível")
 
     # MUDANÇA DRÁSTICA: Migração automática para sistema Multiusuário
     if "globalConfig" not in data:
@@ -142,17 +235,20 @@ def load_data():
         header_data = data.get("headerData", {"date": "", "selectedTemplateId": models[0]["id"] if models else "",
                                               "showSignatures": True})
 
+        _adm_pw = generate_temp_password(12)
+        import sys
+        print(f"[SETUP] Admin inicial criado -> usuario: admin | senha temporaria: {_adm_pw} (troque no primeiro acesso)", flush=True)
         data = {
             "users": {
                 "admin": {
-                    "passwordHash": hash_password("admin"),
+                    "passwordHash": hash_password(_adm_pw),
                     "role": "admin",
                     "status": "active",
                     "firstName": "Administrador",
                     "lastName": "",
                     "email": "",
                     "phone": "",
-                    "mustResetPassword": False,
+                    "mustResetPassword": True,
                     "createdAt": datetime.utcnow().isoformat() + "Z"
                 }
             },
@@ -202,6 +298,16 @@ def load_data():
             u["filialId"] = "matriz"
             changed = True
 
+    # Segurança: desativa o admin padrão se ainda estiver com a senha "admin" (uma vez só).
+    if not data.get("_adminDefaultChecked"):
+        adm = data.get("users", {}).get("admin")
+        if adm and adm.get("status") == "active" and verify_password("admin", adm.get("passwordHash", "")):
+            adm["status"] = "disabled"
+            import sys
+            print("[SETUP] Admin padrão (admin/admin) DESATIVADO por segurança.", flush=True)
+        data["_adminDefaultChecked"] = True
+        changed = True
+
     if changed:
         save_data(data)
 
@@ -217,6 +323,7 @@ def save_data(data):
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, DATA_FILE)
+    _backup_daily(data)
 
 
 @app.route('/api/login', methods=['POST'])
@@ -226,8 +333,12 @@ def login():
     password = creds.get('password') or ''
     full_data = load_data()
 
+    if _login_blocked(username):
+        return jsonify({"success": False, "message": "Muitas tentativas. Aguarde alguns minutos e tente novamente."}), 429
+
     user = full_data['users'].get(username)
     if not user or not verify_password(password, user.get('passwordHash', '')):
+        _login_record_fail(username)
         return jsonify({"success": False, "message": "Usuário ou senha incorretos."}), 401
 
     status = user.get('status', 'active')
@@ -236,14 +347,29 @@ def login():
     if status == 'disabled':
         return jsonify({"success": False, "message": "Sua conta foi desativada. Contate o administrador."}), 403
 
+    # Token de sessão aleatório (não é mais o nome de usuário)
+    token = _create_session(full_data, username)
+    save_data(full_data)
     return jsonify({
         "success": True,
-        "token": username,
+        "token": token,
+        "username": username,
         "role": user['role'],
         "firstName": user.get('firstName', ''),
         "lastName": user.get('lastName', ''),
         "mustResetPassword": user.get('mustResetPassword', False)
     })
+
+
+@app.route('/api/logout', methods=['POST'])
+def logout():
+    token = request.headers.get('Authorization')
+    full_data = load_data()
+    sessions = full_data.get('sessions') or {}
+    if token in sessions:
+        del sessions[token]
+        save_data(full_data)
+    return jsonify({"success": True})
 
 
 @app.route('/api/register', methods=['POST'])
@@ -295,9 +421,9 @@ def register():
 
 @app.route('/api/change-password', methods=['POST'])
 def change_password():
-    user = request.headers.get('Authorization')
     full_data = load_data()
-    if not user or user not in full_data['users']:
+    user = _resolve_token(full_data, request.headers.get('Authorization'))
+    if not user:
         return jsonify({"error": "Não autorizado"}), 401
 
     body = request.json or {}
@@ -318,10 +444,10 @@ def change_password():
 
 @app.route('/api/data', methods=['GET'])
 def get_data():
-    user = request.headers.get('Authorization')
     full_data = load_data()
+    user = _resolve_token(full_data, request.headers.get('Authorization'))
 
-    if not user or user not in full_data['users']:
+    if not user:
         return jsonify({"error": "Não autorizado"}), 401
 
     # Inicializa o estado do usuário caso seja o primeiro login dele
@@ -345,11 +471,11 @@ def get_data():
 
 @app.route('/api/data', methods=['POST'])
 def update_data():
-    user = request.headers.get('Authorization')
     payload = request.json
     full_data = load_data()
+    user = _resolve_token(full_data, request.headers.get('Authorization'))
 
-    if not user or user not in full_data['users']:
+    if not user:
         return jsonify({"error": "Não autorizado"}), 401
 
     role = full_data['users'][user]['role']
@@ -377,9 +503,9 @@ def _set_omie_context(full_data, username):
 
 
 def _require_admin():
-    user = request.headers.get('Authorization')
     full_data = load_data()
-    if not user or user not in full_data['users'] or full_data['users'][user]['role'] != 'admin':
+    user = _resolve_token(full_data, request.headers.get('Authorization'))
+    if not user or full_data['users'][user].get('role') != 'admin':
         return None, None, (jsonify({"error": "Não autorizado"}), 401)
     _set_omie_context(full_data, user)
     return user, full_data, None
@@ -497,9 +623,9 @@ def reset_password(username):
 @app.route('/api/laudos', methods=['GET', 'POST', 'DELETE'])
 def manage_laudos():
     """CRUD de laudos salvos (histórico). Cada usuário tem seus laudos."""
-    user = request.headers.get('Authorization')
     full_data = load_data()
-    if not user or user not in full_data['users']:
+    user = _resolve_token(full_data, request.headers.get('Authorization'))
+    if not user:
         return jsonify({"error": "Não autorizado"}), 401
 
     if 'laudos' not in full_data:
@@ -903,9 +1029,9 @@ def _enriquece_pecas_omie(parts):
 
 
 def _require_user():
-    user = request.headers.get('Authorization')
     full_data = load_data()
-    if not user or user not in full_data['users']:
+    user = _resolve_token(full_data, request.headers.get('Authorization'))
+    if not user:
         return None, None, (jsonify({"error": "Não autorizado"}), 401)
     if full_data['users'][user].get('status') != 'active':
         return None, None, (jsonify({"error": "Conta inativa"}), 403)
@@ -958,30 +1084,6 @@ def omie_debug_listaros():
             "registros_por_pagina": 3,
             "apenas_importado_api": "N"
         })
-        return jsonify(data)
-    except OmieError as e:
-        return jsonify({"error": str(e)}), e.status
-
-
-@app.route('/api/omie/debug/os', methods=['GET'])
-def omie_debug_os():
-    """DEBUG: retorna a resposta crua do ConsultarOS pra inspecionar campos.
-    Aceita token via header Authorization OU query ?token= (pra abrir no navegador). Admin only."""
-    token = request.headers.get('Authorization') or request.args.get('token')
-    full_data = load_data()
-    if not token or token not in full_data['users'] or full_data['users'][token].get('role') != 'admin':
-        return jsonify({"error": "Não autorizado. Use ?token=SEU_USUARIO (precisa ser admin)."}), 401
-    _set_omie_context(full_data, token)
-    nCodOS = request.args.get('nCodOS')
-    cNumOS = request.args.get('cNumOS') or request.args.get('num')
-    if nCodOS:
-        consulta_param = {"nCodOS": int(nCodOS)}
-    elif cNumOS:
-        consulta_param = {"cNumOS": str(cNumOS)}
-    else:
-        return jsonify({"error": "Informe ?cNumOS=390 (número da OS) ou ?nCodOS= (código interno)"}), 400
-    try:
-        data = omie_call('/servicos/os/', 'ConsultarOS', consulta_param)
         return jsonify(data)
     except OmieError as e:
         return jsonify({"error": str(e)}), e.status
@@ -2705,8 +2807,7 @@ def os_send(os_id):
 
     # Log de debug
     import sys
-    print(f"[OS-SEND] is_update={is_update} call={'AlterarOS' if is_update else 'IncluirOS'}", flush=True)
-    print(f"[OS-SEND] PAYLOAD: {json.dumps(param, ensure_ascii=False)[:1200]}", flush=True)
+    print(f"[OS-SEND] is_update={is_update} call={'AlterarOS' if is_update else 'IncluirOS'} servicos={len(itens)}", flush=True)
     sys.stdout.flush()
 
     # As peças NÃO vão como "produtos utilizados" da OS (a API não aceita preço nelas).
@@ -3354,7 +3455,7 @@ HTML_PAGE = """
                     body: JSON.stringify({ username, password })
                 }).then(r => r.json().then(data => ({status: r.status, data}))).then(({status, data}) => {
                     if (data.success) {
-                        const newAuth = { token: data.token, role: data.role, firstName: data.firstName, lastName: data.lastName };
+                        const newAuth = { token: data.token, username: data.username, role: data.role, firstName: data.firstName, lastName: data.lastName };
                         localStorage.setItem('smartReportAuth', JSON.stringify(newAuth));
                         setAuth(newAuth);
                         if (data.mustResetPassword) setMustChangePwd(true);
@@ -3418,6 +3519,12 @@ HTML_PAGE = """
             };
 
             const handleLogout = () => {
+                // Invalida a sessão no servidor (best-effort)
+                try {
+                    if (auth && auth.token) {
+                        fetch('/api/logout', { method: 'POST', headers: { 'Authorization': auth.token } }).catch(() => {});
+                    }
+                } catch (e) {}
                 localStorage.removeItem('smartReportAuth');
                 setAuth(null);
                 setIsLoaded(false);
@@ -3699,7 +3806,7 @@ HTML_PAGE = """
             const baixarPdfLaudo = async () => {
                 const clientField = headerConfig.find(f => f.id === 'client');
                 const clientName = clientField ? (headerData[clientField.id] || 'laudo') : 'laudo';
-                const filename = `laudo_${clientName.replace(/[^a-zA-Z0-9_\-]/g, '_')}.pdf`;
+                const filename = `laudo_${clientName.replace(/[^a-zA-Z0-9_-]/g, '_')}.pdf`;
                 const payload = { ..._montarPayloadLaudo(), filename };
                 try {
                     const resp = await fetch('/api/gerar-pdf-download', {
@@ -3788,7 +3895,7 @@ HTML_PAGE = """
                     const base64 = (img.src || '').split(',')[1];
                     if (!base64) continue;
                     const ext = (img.src.indexOf('image/png') !== -1) ? 'png' : 'jpg';
-                    const safeName = (img.caption || ('foto_' + (i+1))).replace(/[^a-zA-Z0-9_\-]/g, '_');
+                    const safeName = (img.caption || ('foto_' + (i+1))).replace(/[^a-zA-Z0-9_-]/g, '_');
                     folder.file(`${(i+1).toString().padStart(2,'0')}_${safeName}.${ext}`, base64, { base64: true });
                 }
                 const blob = await zip.generateAsync({ type: 'blob' });
@@ -3797,7 +3904,7 @@ HTML_PAGE = """
                 a.href = url;
                 const clientField = headerConfig.find(f => f.id === 'client');
                 const clientName = clientField ? (headerData[clientField.id] || 'laudo') : 'laudo';
-                a.download = `evidencias_${clientName.replace(/[^a-zA-Z0-9_\-]/g, '_')}.zip`;
+                a.download = `evidencias_${clientName.replace(/[^a-zA-Z0-9_-]/g, '_')}.zip`;
                 a.click();
                 URL.revokeObjectURL(url);
             };
@@ -5134,7 +5241,7 @@ HTML_PAGE = """
                             <div className="flex flex-col">
                                 <h1 className="text-2xl font-bold flex items-center gap-2"><i className="ph-fill ph-device-mobile text-blue-400"></i> Biodron Smart Report Pro</h1>
                                 <span className="text-slate-400 text-sm mt-1 flex items-center gap-2">
-                                    <i className="ph-fill ph-user-circle"></i> Olá, <b className="text-white">${auth.token}</b>
+                                    <i className="ph-fill ph-user-circle"></i> Olá, <b className="text-white">${auth.username || auth.firstName || 'usuário'}</b>
                                     <button onClick=${handleLogout} className="ml-2 text-red-400 hover:text-red-300 underline font-medium text-xs">Sair da Conta</button>
                                 </span>
                             </div>
