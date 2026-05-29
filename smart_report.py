@@ -2163,9 +2163,13 @@ def _gerar_pdf_laudo(payload):
                 unit = float(it.get('unitPrice') or 0)
                 tot = qty * unit
                 subtotal += tot
-                desc = (it.get('description') or it.get('code') or '—')
+                # Descrição curta: corta o laudo embutido (após '||' / '|' / quebra de linha) e limita tamanho.
+                desc = str(it.get('description') or it.get('code') or '—')
+                desc = desc.split('||')[0].split('\n')[0].split('|')[0].strip() or (it.get('code') or '—')
+                if len(desc) > 110:
+                    desc = desc[:107] + '...'
                 data.append([
-                    Paragraph(str(desc), body),
+                    Paragraph(desc, body),
                     Paragraph(_fmt_qty(qty), cell_c),
                     Paragraph(_brl(unit), cell_r),
                     Paragraph(_brl(tot), cell_r),
@@ -2582,32 +2586,41 @@ def os_send(os_id):
             except OmieError:
                 pass
 
-        produtos_utilizados = []
+        # Agrupa peças repetidas (mesmo produto) somando a quantidade, pra evitar o erro
+        # "produto já cadastrado para o mesmo local de estoque" quando há linhas duplicadas.
+        agrupadas = {}
+        ordem = []
         for p in parts_validas:
             cod_prod = int(p.get('omieProductId') or 0)
+            if cod_prod not in agrupadas:
+                agrupadas[cod_prod] = {"quantity": 0.0, "nIdItem": p.get('nIdItem')}
+                ordem.append(cod_prod)
+            agrupadas[cod_prod]["quantity"] += float(p.get('quantity') or 1)
+            if not agrupadas[cod_prod]["nIdItem"] and p.get('nIdItem'):
+                agrupadas[cod_prod]["nIdItem"] = p.get('nIdItem')
+
+        produtos_utilizados = []
+        for cod_prod in ordem:
+            info = agrupadas[cod_prod]
             # NOTA: o tipo produtoUtilizado do Omie NÃO tem campo de valor unitário
             # (testados e rejeitados: nValUnitPU, nValorUnitarioPU, vUnitarioPU). O preço
-            # das peças não pode ser enviado por aqui — ver geração de Pedido de Venda separado.
+            # das peças vai pro cliente pela página de Orçamento do PDF.
             prod_item = {
                 "nCodProdutoPU": cod_prod,
-                "nQtdePU": float(p.get('quantity') or 1)
+                "nQtdePU": info["quantity"]
             }
             # Prioriza nIdItem salvo, senão usa o mapeado da consulta
-            nid_orig = p.get('nIdItem') or existing_parts_map.get(cod_prod)
+            nid_orig = info["nIdItem"] or existing_parts_map.get(cod_prod)
             if nid_orig:
                 prod_item["nIdItemPU"] = int(nid_orig)
                 prod_item["cAcaoItemPU"] = "A"
             else:
                 prod_item["cAcaoItemPU"] = "I"
             produtos_utilizados.append(prod_item)
-        # "PED" gera Pedido de Venda das peças no faturamento (puxa o preço do cadastro do produto).
-        # "REM" gera só remessa (sem preço) e "EST" só baixa estoque -> ambos deixavam peças sem preço.
-        categ_pv = get_categoria_pedido_venda_code()
-        if not categ_pv:
-            return jsonify({"error": f"Categoria '{CATEGORIA_PEDIDO_VENDA_PADRAO}' não encontrada no Omie. Verifique se ela existe no cadastro de Categorias (ou limpe o cache)."}), 400
+        # "EST" = saída de estoque: registra a peça e baixa o estoque, SEM bloquear o
+        # faturamento (o "PED" exigia preço por peça, que a API não aceita).
         param["produtosUtilizados"] = {
-            "cAcaoProdUtilizados": "PED",
-            "cCodCategRem": categ_pv,
+            "cAcaoProdUtilizados": "EST",
             "produtoUtilizado": produtos_utilizados
         }
 
