@@ -2851,6 +2851,23 @@ HTML_PAGE = """
     <meta name="google" content="notranslate">
     <title>Biodron Smart Report Pro - Baterias</title>
 
+    <!-- PWA (app instalável) -->
+    <link rel="manifest" href="/manifest.webmanifest">
+    <meta name="theme-color" content="#1e40af">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Smart Report">
+    <link rel="apple-touch-icon" href="/icon-192.png">
+    <link rel="icon" type="image/png" href="/icon-192.png">
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', function () {
+                navigator.serviceWorker.register('/sw.js').catch(function (e) { console.log('SW falhou', e); });
+            });
+        }
+    </script>
+
     <script src="https://cdn.tailwindcss.com"></script>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -5453,6 +5470,96 @@ HTML_PAGE = """
 @app.route('/')
 def index():
     return HTML_PAGE
+
+
+# ==========================================================
+#  PWA — app instalável (manifest + service worker + ícones)
+# ==========================================================
+_ICON_CACHE = {}
+
+
+def _icon_png(size):
+    if size in _ICON_CACHE:
+        return _ICON_CACHE[size]
+    from PIL import Image, ImageDraw
+    S = size
+    img = Image.new('RGB', (S, S), (30, 64, 175))  # #1e40af (azul Biodron)
+    d = ImageDraw.Draw(img)
+    # Corpo da bateria (branco, arredondado)
+    bx0, by0, bx1, by1 = int(0.20 * S), int(0.36 * S), int(0.72 * S), int(0.64 * S)
+    d.rounded_rectangle([bx0, by0, bx1, by1], radius=int(0.05 * S), fill=(255, 255, 255))
+    # Terminal (+)
+    d.rounded_rectangle([bx1, int(0.45 * S), int(0.78 * S), int(0.55 * S)], radius=int(0.02 * S), fill=(255, 255, 255))
+    # 3 barras de carga (azul) dentro do corpo
+    pad = int(0.025 * S)
+    inner_w = (bx1 - bx0) - 2 * pad
+    bar_w = int((inner_w - 2 * pad) / 3)
+    for i in range(3):
+        x0 = bx0 + pad + i * (bar_w + pad)
+        d.rounded_rectangle([x0, by0 + pad, x0 + bar_w, by1 - pad], radius=int(0.01 * S), fill=(30, 64, 175))
+    out = io.BytesIO()
+    img.save(out, format='PNG')
+    _ICON_CACHE[size] = out.getvalue()
+    return _ICON_CACHE[size]
+
+
+@app.route('/manifest.webmanifest')
+def pwa_manifest():
+    manifest = {
+        "name": "Biodron Smart Report Pro",
+        "short_name": "Smart Report",
+        "description": "Laudos de bateria DJI Agras e ordens de serviço",
+        "start_url": "/",
+        "scope": "/",
+        "display": "standalone",
+        "orientation": "portrait",
+        "background_color": "#0f172a",
+        "theme_color": "#1e40af",
+        "lang": "pt-BR",
+        "icons": [
+            {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+        ]
+    }
+    return Response(json.dumps(manifest), mimetype='application/manifest+json')
+
+
+_SW_JS = """
+const CACHE = 'smart-report-v1';
+self.addEventListener('install', (e) => {
+  e.waitUntil(caches.open(CACHE).then((c) => c.add('/')).catch(()=>{}).then(() => self.skipWaiting()));
+});
+self.addEventListener('activate', (e) => {
+  e.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim()));
+});
+self.addEventListener('fetch', (e) => {
+  const req = e.request;
+  if (req.method !== 'GET') return;
+  const url = new URL(req.url);
+  if (url.pathname.startsWith('/api/')) return;            // API sempre na rede
+  if (req.mode === 'navigate') {                            // navegação: rede primeiro, cache de reserva
+    e.respondWith(
+      fetch(req).then((res) => { const cl = res.clone(); caches.open(CACHE).then((c) => c.put('/', cl)); return res; })
+                .catch(() => caches.match('/'))
+    );
+  }
+});
+"""
+
+
+@app.route('/sw.js')
+def pwa_sw():
+    return Response(_SW_JS, mimetype='application/javascript')
+
+
+@app.route('/icon-192.png')
+def pwa_icon_192():
+    return Response(_icon_png(192), mimetype='image/png')
+
+
+@app.route('/icon-512.png')
+def pwa_icon_512():
+    return Response(_icon_png(512), mimetype='image/png')
 
 
 def get_local_ip():
