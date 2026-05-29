@@ -2447,9 +2447,16 @@ def os_send(os_id):
         produtos_utilizados = []
         for p in parts_validas:
             cod_prod = int(p.get('omieProductId') or 0)
+            preco_un = float(p.get('unitPrice') or 0)
             prod_item = {
                 "nCodProdutoPU": cod_prod,
-                "nQtdePU": float(p.get('quantity') or 1)
+                "nQtdePU": float(p.get('quantity') or 1),
+                # Campo de valor unitário é NÃO documentado pela Omie. Mandamos vários nomes
+                # candidatos (campos desconhecidos são ignorados) e a tela "Conferir" confirma qual pegou.
+                "nValorUnitarioPU": preco_un,
+                "vUnitarioPU": preco_un,
+                "nValUnitPU": preco_un,
+                "valorUnitarioPU": preco_un,
             }
             # Prioriza nIdItem salvo, senão usa o mapeado da consulta
             nid_orig = p.get('nIdItem') or existing_parts_map.get(cod_prod)
