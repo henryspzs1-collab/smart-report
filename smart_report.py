@@ -826,6 +826,61 @@ def get_categoria_pedido_venda_code(nome=None):
     return None
 
 
+def _omie_produtos_all():
+    """Lista de produtos do Omie (cacheada por filial): [{id, code, description, unit, unitPrice}]."""
+    cache_key = "produtos_full"
+    all_items = _cache_get(cache_key)
+    if all_items is None:
+        all_items = []
+        page = 1
+        while page <= 20:
+            param = {
+                "pagina": page,
+                "registros_por_pagina": 100,
+                "apenas_importado_api": "N",
+                "filtrar_apenas_omiepdv": "N"
+            }
+            try:
+                data = omie_call('/geral/produtos/', 'ListarProdutos', param)
+            except OmieNoRecords:
+                break
+            for p in data.get('produto_servico_cadastro', []) or []:
+                all_items.append({
+                    "id": p.get('codigo_produto'),
+                    "code": p.get('codigo') or '',
+                    "description": p.get('descricao') or '',
+                    "unit": p.get('unidade'),
+                    "unitPrice": float(p.get('valor_unitario') or 0)
+                })
+            total_pages = data.get('total_de_paginas', 1) or 1
+            if page >= total_pages:
+                break
+            page += 1
+        _cache_set(cache_key, all_items)
+    return all_items
+
+
+def _enriquece_pecas_omie(parts):
+    """Preenche code/description/unitPrice das peças a partir do cadastro de produtos do Omie,
+    casando pelo omieProductId (= codigo_produto). Usado na importação de OS."""
+    if not parts:
+        return parts
+    try:
+        prod_map = {str(p['id']): p for p in _omie_produtos_all() if p.get('id') is not None}
+    except OmieError:
+        return parts
+    for pc in parts:
+        info = prod_map.get(str(pc.get('omieProductId')))
+        if info:
+            if not pc.get('description'):
+                pc['description'] = info.get('description') or ''
+            if not pc.get('code'):
+                pc['code'] = info.get('code') or ''
+            if not pc.get('unitPrice'):
+                pc['unitPrice'] = info.get('unitPrice') or 0
+    return parts
+
+
 def _require_user():
     user = request.headers.get('Authorization')
     full_data = load_data()
@@ -1049,6 +1104,7 @@ def omie_os_consulta(nCodOS):
                 "quantity": float(p.get('nQtdePU') or 1),
                 "unitPrice": 0
             })
+        _enriquece_pecas_omie(parts)
 
         return jsonify({
             "omieOsId": cab.get('nCodOS'),
@@ -1136,6 +1192,7 @@ def os_importar_omie():
             "unitPrice": 0,
             "nIdItem": p.get('nIdItem')
         })
+    _enriquece_pecas_omie(parts)
 
     now = datetime.utcnow().isoformat() + "Z"
     draft = {
@@ -1407,36 +1464,7 @@ def omie_produtos():
     q = (request.args.get('q') or '').strip()
 
     try:
-        cache_key = "produtos_full"
-        all_items = _cache_get(cache_key)
-        if all_items is None:
-            all_items = []
-            page = 1
-            max_pages = 20
-            while page <= max_pages:
-                param = {
-                    "pagina": page,
-                    "registros_por_pagina": 100,
-                    "apenas_importado_api": "N",
-                    "filtrar_apenas_omiepdv": "N"
-                }
-                try:
-                    data = omie_call('/geral/produtos/', 'ListarProdutos', param)
-                except OmieNoRecords:
-                    break
-                for p in data.get('produto_servico_cadastro', []) or []:
-                    all_items.append({
-                        "id": p.get('codigo_produto'),
-                        "code": p.get('codigo') or '',
-                        "description": p.get('descricao') or '',
-                        "unit": p.get('unidade'),
-                        "unitPrice": float(p.get('valor_unitario') or 0)
-                    })
-                total_pages = data.get('total_de_paginas', 1) or 1
-                if page >= total_pages:
-                    break
-                page += 1
-            _cache_set(cache_key, all_items)
+        all_items = _omie_produtos_all()
 
         if q:
             filtered = [p for p in all_items if _matches_wildcard(p['description'], q) or _matches_wildcard(p['code'] or '', q)]
