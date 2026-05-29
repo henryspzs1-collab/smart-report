@@ -3097,6 +3097,16 @@ HTML_PAGE = """
                     });
             };
 
+            // Só oferece limpar quando OS + PDF + Fotos já foram todos enviados ao Omie.
+            const maybeOfferClearAfterOmie = (os) => {
+                if (os && os.status === 'sent' && os.pdfAnexado && os.fotosAnexadas) {
+                    if (confirm('OS, PDF e Fotos enviados ao Omie! Deseja limpar o laudo e voltar pra lista, pra começar a próxima?')) {
+                        clearCurrentReport();
+                        setCurrentOs(null);
+                    }
+                }
+            };
+
             const sendOsToOmie = () => {
                 if (!currentOs) return;
                 setOsSendError('');
@@ -3114,10 +3124,7 @@ HTML_PAGE = """
                             if (data.pedidoVendaNumero) msg += `\nPedido de Venda das peças: nº ${data.pedidoVendaNumero}`;
                             if (data.warning) msg += `\n\n⚠️ ${data.warning}`;
                             alert(msg);
-                            if (confirm('OS finalizada e enviada! Deseja limpar o laudo e voltar pra lista, pra começar a próxima?')) {
-                                clearCurrentReport();
-                                setCurrentOs(null);
-                            }
+                            maybeOfferClearAfterOmie(data);
                         } else {
                             setOsSendError(data.error || 'Erro ao enviar');
                         }
@@ -3258,8 +3265,10 @@ HTML_PAGE = """
                     catch (e) { alert(`Erro: resposta inválida do servidor (HTTP ${resp.status}). Conteúdo: ${text.substring(0, 200)}`); return; }
                     if (data.success) {
                         alert(`${data.count} foto(s) anexada(s) com sucesso!`);
-                        setCurrentOs(prev => ({ ...prev, fotosAnexadas: true, fotosCount: data.count }));
+                        const nextOs = { ...currentOs, fotosAnexadas: true, fotosCount: data.count };
+                        setCurrentOs(nextOs);
                         fetchOsDrafts();
+                        maybeOfferClearAfterOmie(nextOs);
                     } else {
                         alert('Erro do servidor: ' + (data.error || `HTTP ${resp.status}`));
                     }
@@ -3308,8 +3317,10 @@ HTML_PAGE = """
                     catch { alert(`Erro: resposta inválida (HTTP ${resp.status}): ${text.substring(0,200)}`); return; }
                     if (data.success) {
                         alert('PDF do laudo anexado à OS no Omie!');
-                        setCurrentOs(prev => ({ ...prev, pdfAnexado: true }));
+                        const nextOs = { ...currentOs, pdfAnexado: true };
+                        setCurrentOs(nextOs);
                         fetchOsDrafts();
+                        maybeOfferClearAfterOmie(nextOs);
                     } else {
                         alert('Erro: ' + (data.error || `HTTP ${resp.status}`));
                     }
