@@ -15,6 +15,21 @@ from urllib.error import HTTPError, URLError
 import bcrypt
 
 app = Flask(__name__)
+# Limite de upload (fotos/PDF em base64): 60 MB
+app.config['MAX_CONTENT_LENGTH'] = 60 * 1024 * 1024
+
+
+@app.errorhandler(Exception)
+def _handle_uncaught(e):
+    """Nunca devolve HTML cru: erros viram JSON e o traceback vai pro log do Render."""
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return jsonify({"error": e.description, "code": e.code}), e.code
+    import traceback
+    import sys
+    traceback.print_exc(file=sys.stdout)
+    sys.stdout.flush()
+    return jsonify({"error": f"Erro interno no servidor: {type(e).__name__}: {e}"}), 500
 
 
 # -------- Auth helpers --------
