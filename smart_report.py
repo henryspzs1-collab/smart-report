@@ -2035,7 +2035,7 @@ Status: Aguardando Aprovação de Orçamento
 
 6. Garantia e Avisos Importantes:
 [SEMPRE incluir os três itens abaixo, mesmo que a bateria não apresente defeitos graves:]
-[a) Selo de Umidade: informar se o selo foi ativado (cor alterada) e que a ativação do selo de umidade anula automaticamente a garantia de fábrica DJI, pois indica que a bateria foi exposta a umidade ou condensação — condição excluída da cobertura do fabricante.]
+[a) Selo de Umidade: informar se o selo foi ativado (cor alterada). Se ativado, deixar claro que: (1) a garantia de fábrica DJI é automaticamente anulada, pois indica exposição a umidade ou condensação — condição excluída da cobertura do fabricante; (2) a umidade pode ter comprometido internamente as células lítio-polímero de forma não visível na inspeção, portanto o Laboratório BioDron NÃO PODE GARANTIR a saúde das células nem o desempenho pleno após a manutenção; (3) existe risco de degradação acelerada, perda de capacidade ou falha das células mesmo após os serviços realizados, e o cliente está ciente desse risco ao aprovar o orçamento.]
 [b) Risco de Infiltração: alertar que qualquer comprometimento da vedação (borrachas, encaixes, adesivos) expõe o BMS e as células lítio-polímero a umidade e agentes químicos do campo (herbicidas, inseticidas), podendo causar corrosão interna, curto-circuito e risco de incêndio.]
 [c) Falhas Secundárias: esclarecer que em baterias com desgaste avançado ou que sofreram impacto/infiltração, após a intervenção técnica podem se manifestar falhas secundárias em componentes internos que já estavam comprometidos antes da manutenção — situação inerente ao estado prévio do equipamento e sem responsabilidade do Laboratório BioDron.]
 
