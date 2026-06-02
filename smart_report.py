@@ -1245,6 +1245,32 @@ def omie_debug_oportunidade(cod):
         return jsonify({"error": str(e)}), e.status
 
 
+@app.route('/api/omie/debug/call', methods=['GET'])
+def omie_debug_call():
+    """DESCOBERTA GENÉRICA (admin): chama qualquer endpoint/método do Omie.
+    Uso: ?endpoint=/crm/fases/&call=ListarFases&param={...json...}
+    Permite explorar a API sem precisar de novo deploy a cada tentativa."""
+    user, full_data, err = _require_admin()
+    if err:
+        return err
+    endpoint = request.args.get('endpoint')
+    call = request.args.get('call')
+    param_json = request.args.get('param', '{}')
+    if not endpoint or not call:
+        return jsonify({"error": "Informe ?endpoint=/crm/fases/&call=ListarFases&param={}"}), 400
+    try:
+        param = json.loads(param_json)
+    except Exception:
+        return jsonify({"error": "param não é JSON válido", "recebido": param_json}), 400
+    try:
+        data = omie_call(endpoint, call, param)
+        return jsonify(data)
+    except OmieNoRecords:
+        return jsonify({"empty": True, "msg": "Sem registros."})
+    except OmieError as e:
+        return jsonify({"error": str(e), "endpoint": endpoint, "call": call, "param": param}), e.status
+
+
 @app.route('/api/omie/os/abertas', methods=['GET'])
 def omie_os_abertas():
     """Lista OSes do Omie que ainda não foram faturadas/canceladas, pra técnico importar e editar."""
