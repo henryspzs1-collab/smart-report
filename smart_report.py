@@ -3908,7 +3908,7 @@ HTML_PAGE = """
 
             const finalizarCompleto = async () => {
                 if (!currentOs) return;
-                if (!confirm('Confirma que o laudo e o orçamento estão completamente preenchidos?\n\nO sistema vai:\n1. Atualizar a OS no Omie\n2. Gerar e anexar o PDF do laudo\n3. Anexar as fotos (se houver)\n4. Limpar os dados do laudo')) return;
+                if (!confirm('Confirma que o laudo e o orçamento estão completamente preenchidos?\\n\\nO sistema vai:\\n1. Atualizar a OS no Omie\\n2. Gerar e anexar o PDF do laudo\\n3. Anexar as fotos (se houver)\\n4. Limpar os dados do laudo')) return;
 
                 setFinalizando(true);
                 setOsSendError('');
