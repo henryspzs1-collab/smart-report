@@ -1199,79 +1199,7 @@ def omie_debug_listaros():
         return jsonify({"error": str(e)}), e.status
 
 
-# ===== CRM / Oportunidades — Fase 1: descoberta da estrutura real =====
-@app.route('/api/omie/debug/oportunidades', methods=['GET'])
-def omie_debug_oportunidades():
-    """DESCOBERTA: lista oportunidades cruas do CRM Omie pra inspecionarmos os campos
-    reais (código da fase '01 - Em Análise', dados de cliente/contato, ticket).
-    Aceita ?pagina=, ?registros= e ?fase= (opcional) na query string."""
-    user, full_data, err = _require_user()
-    if err:
-        return err
-    pagina = int(request.args.get('pagina', 1))
-    registros = int(request.args.get('registros', 20))
-    param = {
-        "pagina": pagina,
-        "registros_por_pagina": registros,
-        "apenas_importado_api": "N"
-    }
-    # Filtro de fase é opcional — só inclui se passado, pra primeiro vermos tudo
-    fase = request.args.get('fase')
-    if fase:
-        param["fase"] = int(fase)
-    try:
-        data = omie_call('/crm/oportunidades/', 'ListarOportunidades', param)
-        return jsonify(data)
-    except OmieNoRecords:
-        return jsonify({"empty": True, "msg": "Nenhuma oportunidade encontrada nessa página/fase."})
-    except OmieError as e:
-        return jsonify({"error": str(e), "param_enviado": param}), e.status
-
-
-@app.route('/api/omie/debug/oportunidade/<cod>', methods=['GET'])
-def omie_debug_oportunidade(cod):
-    """DESCOBERTA: consulta uma oportunidade específica pra ver TODOS os campos
-    (incluindo o ticket detalhado). Tenta nCodOp; se a Omie reclamar do nome,
-    o erro retornado nos diz o campo correto."""
-    user, full_data, err = _require_user()
-    if err:
-        return err
-    try:
-        data = omie_call('/crm/oportunidades/', 'ConsultarOportunidade', {
-            "nCodOp": int(cod)
-        })
-        return jsonify(data)
-    except OmieError as e:
-        return jsonify({"error": str(e)}), e.status
-
-
-@app.route('/api/omie/debug/call', methods=['GET'])
-def omie_debug_call():
-    """DESCOBERTA GENÉRICA (admin): chama qualquer endpoint/método do Omie.
-    Uso: ?endpoint=/crm/fases/&call=ListarFases&param={...json...}
-    Permite explorar a API sem precisar de novo deploy a cada tentativa."""
-    user, full_data, err = _require_admin()
-    if err:
-        return err
-    endpoint = request.args.get('endpoint')
-    call = request.args.get('call')
-    param_json = request.args.get('param', '{}')
-    if not endpoint or not call:
-        return jsonify({"error": "Informe ?endpoint=/crm/fases/&call=ListarFases&param={}"}), 400
-    try:
-        param = json.loads(param_json)
-    except Exception:
-        return jsonify({"error": "param não é JSON válido", "recebido": param_json}), 400
-    try:
-        data = omie_call(endpoint, call, param)
-        return jsonify(data)
-    except OmieNoRecords:
-        return jsonify({"empty": True, "msg": "Sem registros."})
-    except OmieError as e:
-        return jsonify({"error": str(e), "endpoint": endpoint, "call": call, "param": param}), e.status
-
-
-# ===== CRM / Oportunidades — Fase 2: listar e puxar pro laudo =====
+# ===== CRM / Oportunidades — listar e puxar pro laudo =====
 # Fases do funil da conta BioDron (nCodFase → nome). Específico desta conta Omie.
 CRM_FASES = {
     10843780550: "01 Em Análise",
@@ -1491,6 +1419,28 @@ def crm_detalhe_oportunidade(n_cod_op):
         "descricao": c_des_op,
         "observacoes": obs_legivel,
     })
+
+
+@app.route('/api/crm/oportunidade/<n_cod_op>/mover-fase', methods=['POST'])
+def crm_mover_fase(n_cod_op):
+    """Move uma oportunidade pra uma fase escolhida (uso manual, ex: reverter um teste).
+    Body: {nCodFase}. Valida que a fase existe no funil."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    body = request.json or {}
+    nova_fase = body.get('nCodFase')
+    try:
+        nova_fase = int(nova_fase)
+    except (TypeError, ValueError):
+        return jsonify({"error": "nCodFase inválido"}), 400
+    if nova_fase not in CRM_FASES:
+        return jsonify({"error": "Fase desconhecida"}), 400
+    try:
+        _mover_fase_oportunidade(n_cod_op, nova_fase)
+        return jsonify({"success": True, "faseNome": CRM_FASES.get(nova_fase, '')})
+    except OmieError as e:
+        return jsonify({"error": str(e)}), e.status
 
 
 @app.route('/api/omie/os/abertas', methods=['GET'])
@@ -3746,8 +3696,30 @@ HTML_PAGE = """
             };
 
             useEffect(() => {
-                if (auth && activeTab === 'crm' && crmOps.length === 0) fetchCrmOportunidades();
+                if (auth && activeTab === 'crm') {
+                    if (crmOps.length === 0) fetchCrmOportunidades();
+                    fetchOsDrafts(); // pra marcar quais oportunidades já viraram OS
+                }
             }, [activeTab, auth]);
+
+            const moverFaseCrm = async (nCodOp, nCodFase, nomeFase) => {
+                if (!confirm(`Mover esta oportunidade para "${nomeFase}"?`)) return;
+                try {
+                    const d = await fetch(`/api/crm/oportunidade/${nCodOp}/mover-fase`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                        body: JSON.stringify({ nCodFase: nCodFase })
+                    }).then(r => r.json());
+                    if (d.success) {
+                        alert(`Oportunidade movida para: ${d.faseNome}`);
+                        fetchCrmOportunidades();
+                    } else {
+                        alert('Erro: ' + (d.error || 'falha ao mover fase'));
+                    }
+                } catch (e) {
+                    alert('Erro de rede: ' + (e.message || e));
+                }
+            };
 
             const puxarOportunidadeParaLaudo = async (nCodOp) => {
                 setPuxandoCrm(nCodOp);
@@ -5620,6 +5592,14 @@ HTML_PAGE = """
                     return true;
                 });
                 const fmt = (v) => 'R$ ' + parseFloat(v || 0).toFixed(2);
+                const FASES_CRM = [
+                    [10843780550, '01 Em Análise'], [10843780551, '02 Em Aprovação'],
+                    [10843780552, '03 Em Preparação'], [10843780553, '04 Finalizadas'],
+                    [10843780554, '05 Pagos para envio'], [10843780555, '06 Enviadas']
+                ];
+                // Mapeia oportunidades que já viraram OS no sistema (pelo crmOpId no rascunho)
+                const draftPorOp = {};
+                (osDrafts || []).forEach(d => { if (d.crmOpId) draftPorOp[String(d.crmOpId)] = d; });
                 return html`
                     <div className="space-y-4 animate-in fade-in duration-300">
                         <div className="bg-white p-4 rounded-xl border border-slate-200 flex flex-col md:flex-row md:items-center gap-3 justify-between">
@@ -5649,23 +5629,33 @@ HTML_PAGE = """
                                             <th className="p-3 text-left">Descrição (equipamento / defeito)</th>
                                             <th className="p-3 text-left">Fase</th>
                                             <th className="p-3 text-right">Ticket</th>
+                                            <th className="p-3 text-left">OS</th>
                                             <th className="p-3 text-right">Ação</th>
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-slate-100">
-                                        ${opsFiltradas.map(o => html`
+                                        ${opsFiltradas.map(o => {
+                                            const draftDaOp = draftPorOp[String(o.nCodOp)];
+                                            return html`
                                             <tr key=${o.nCodOp} className="hover:bg-slate-50">
                                                 <td className="p-3 font-mono text-xs whitespace-nowrap">${o.cNumOp || '—'}</td>
                                                 <td className="p-3 text-xs max-w-md"><div className="text-slate-800">${o.descricao || '—'}</div><div className="text-slate-400 mt-0.5">inclusão: ${o.dInclusao || '—'}</div></td>
-                                                <td className="p-3"><span className=${`px-2 py-0.5 rounded text-xs font-bold ${o.faseCodigo === 10843780550 ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'}`}>${o.faseNome}</span></td>
+                                                <td className="p-3">
+                                                    <select value=${o.faseCodigo} onChange=${(e) => { const nf = parseInt(e.target.value); const nome = (FASES_CRM.find(f => f[0] === nf) || [])[1] || ''; moverFaseCrm(o.nCodOp, nf, nome); }} className="text-xs p-1 border border-slate-300 rounded bg-white max-w-[150px]">
+                                                        ${FASES_CRM.map(f => html`<option key=${f[0]} value=${f[0]}>${f[1]}</option>`)}
+                                                    </select>
+                                                </td>
                                                 <td className="p-3 text-xs text-right whitespace-nowrap">${o.ticket.total ? fmt(o.ticket.total) : '—'}</td>
+                                                <td className="p-3 text-xs">
+                                                    ${draftDaOp ? (draftDaOp.omieOsNumber ? html`<span className="bg-green-100 text-green-700 px-2 py-0.5 rounded font-bold whitespace-nowrap"><i className="ph-fill ph-check-circle"></i> OS ${draftDaOp.omieOsNumber}</span>` : html`<span className="bg-slate-200 text-slate-600 px-2 py-0.5 rounded font-bold whitespace-nowrap">rascunho</span>`) : html`<span className="text-slate-300">—</span>`}
+                                                </td>
                                                 <td className="p-3 text-right">
                                                     <button onClick=${() => puxarOportunidadeParaLaudo(o.nCodOp)} disabled=${puxandoCrm === o.nCodOp} className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded text-xs font-medium whitespace-nowrap disabled:bg-slate-400">
                                                         ${puxandoCrm === o.nCodOp ? html`<i className="ph ph-spinner animate-spin"></i> Carregando...` : html`<i className="ph-bold ph-file-text"></i> Carregar laudo`}
                                                     </button>
                                                 </td>
                                             </tr>
-                                        `)}
+                                        `})}
                                     </tbody>
                                 </table>
                             </div>
