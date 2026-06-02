@@ -2158,7 +2158,10 @@ def os_create():
         "omieOsId": None,
         "omieOsNumber": None,
         "sentAt": None,
-        "sendError": None
+        "sendError": None,
+        "crmOpId": body.get('crmOpId') or None,
+        "crmOpNum": body.get('crmOpNum') or None,
+        "crmFaseCodigo": body.get('crmFaseCodigo') or None
     }
     drafts = _user_drafts(full_data, user)
     drafts.append(draft)
@@ -3809,10 +3812,18 @@ HTML_PAGE = """
                     modelName && `Modelo: ${modelName}`,
                     defect && `Defeito alegado pelo cliente: ${defect}`
                 ].filter(Boolean).join('\\n\\n');
+                // Se o laudo veio de uma oportunidade do CRM, já temos o cliente de
+                // faturamento resolvido (por CPF/CNPJ) — vincula direto, sem busca por nome.
+                const clientPrefill = headerData.crmClienteOmieId
+                    ? { omieClientId: headerData.crmClienteOmieId, name: clientName, document: '', email: '', phone: '' }
+                    : { omieClientId: null, name: clientName, document: '', email: '', phone: '' };
                 createNewOs({
                     fromLaudo: { client: clientName, model: modelName, defect, generatedAt: new Date().toISOString() },
-                    client: { omieClientId: null, name: clientName, document: '', email: '', phone: '' },
-                    observations: obs
+                    client: clientPrefill,
+                    observations: obs,
+                    crmOpId: headerData.crmOpId || null,
+                    crmOpNum: headerData.crmOpNum || null,
+                    crmFaseCodigo: headerData.crmFaseCodigo || null
                 });
             };
 
