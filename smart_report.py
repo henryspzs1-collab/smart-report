@@ -3190,6 +3190,7 @@ HTML_PAGE = """
             const [produtoSearch, setProdutoSearch] = useState({ q: '', forIndex: null });
             const [produtoResults, setProdutoResults] = useState([]);
             const [osSendError, setOsSendError] = useState('');
+            const [finalizando, setFinalizando] = useState(false);
 
             useEffect(() => {
                 const storedPending = localStorage.getItem('smartReportPendingImages');
@@ -3890,6 +3891,93 @@ HTML_PAGE = """
             }
 
             if (!isLoaded) return html`<div className="flex justify-center items-center h-screen text-xl font-bold text-slate-500"><i className="ph ph-spinner animate-spin mr-2"></i> Carregando dados do usuário...</div>`;
+
+            const finalizarCompleto = async () => {
+                if (!currentOs) return;
+                if (!confirm('Confirma que o laudo e o orçamento estão completamente preenchidos?\n\nO sistema vai:\n1. Atualizar a OS no Omie\n2. Gerar e anexar o PDF do laudo\n3. Anexar as fotos (se houver)\n4. Limpar os dados do laudo')) return;
+
+                setFinalizando(true);
+                setOsSendError('');
+                const erros = [];
+                let osAtual = currentOs;
+
+                // Etapa 1: salvar + enviar/atualizar OS no Omie
+                try {
+                    const savedOs = await saveCurrentOs(true);
+                    const osId = (savedOs && savedOs.id) || osAtual.id;
+                    const r1 = await fetch(\`/api/os/\${osId}/send\`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': auth.token }
+                    });
+                    const d1 = await r1.json();
+                    if (d1.omieOsId || d1.omieOsNumber) {
+                        osAtual = { ...osAtual, ...d1 };
+                        setCurrentOs(osAtual);
+                    } else {
+                        erros.push('Omie: ' + (d1.error || 'erro ao enviar OS'));
+                    }
+                } catch (e) { erros.push('Omie: ' + (e.message || e)); }
+
+                // Etapa 2: gerar PDF e anexar
+                if (!erros.length || osAtual.omieOsId) {
+                    try {
+                        const selectedModel = models.find(m => m.id === headerData.selectedTemplateId);
+                        const pdfPayload = {
+                            headerConfig, headerData, answers,
+                            questions: selectedModel ? selectedModel.questions : [],
+                            diagrams: selectedModel ? selectedModel.diagrams : [],
+                            diagramMarks, reportImages, logo,
+                            technician: (auth.firstName ? \`\${auth.firstName} \${auth.lastName||''}\` : auth.token).trim(),
+                            technicianSignature: headerData.technicianSignature,
+                            showSignatures: headerData.showSignatures !== false,
+                            modelName: selectedModel ? selectedModel.name : '',
+                            cellAnalysis: selectedModel ? selectedModel.cellAnalysis : null,
+                            cellVoltagesList: selectedModel ? (cellVoltages[selectedModel.id] || []) : []
+                        };
+                        const r2 = await fetch(\`/api/os/\${osAtual.id}/gerar-pdf-anexar\`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                            body: JSON.stringify(pdfPayload)
+                        });
+                        const d2 = await r2.json();
+                        if (d2.success) {
+                            osAtual = { ...osAtual, pdfAnexado: true };
+                            setCurrentOs(osAtual);
+                        } else {
+                            erros.push('PDF: ' + (d2.error || 'erro ao anexar'));
+                        }
+                    } catch (e) { erros.push('PDF: ' + (e.message || e)); }
+                }
+
+                // Etapa 3: anexar fotos (apenas se houver fotos)
+                if (reportImages && reportImages.length > 0 && osAtual.omieOsId) {
+                    try {
+                        const r3 = await fetch(\`/api/os/\${osAtual.id}/anexar-fotos\`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                            body: JSON.stringify({ photos: reportImages })
+                        });
+                        const d3 = await r3.json();
+                        if (d3.success) {
+                            osAtual = { ...osAtual, fotosAnexadas: true, fotosCount: d3.count };
+                            setCurrentOs(osAtual);
+                        } else {
+                            erros.push('Fotos: ' + (d3.error || 'erro ao anexar'));
+                        }
+                    } catch (e) { erros.push('Fotos: ' + (e.message || e)); }
+                }
+
+                setFinalizando(false);
+                fetchOsDrafts();
+
+                if (erros.length) {
+                    alert('Concluído com erros:\n' + erros.join('\n') + '\n\nVerifique e tente as etapas individualmente.');
+                } else {
+                    alert('Tudo enviado com sucesso! OS atualizada, PDF e fotos anexados no Omie.\n\nOs dados do laudo serão limpos.');
+                    clearCurrentReport();
+                    setCurrentOs(null);
+                }
+            };
 
             const clearCurrentReport = () => {
                 const resetHeader = {
@@ -5104,6 +5192,11 @@ HTML_PAGE = """
                                             <i className="ph-bold ph-images"></i> ${currentOs.fotosAnexadas ? `Re-anexar Fotos (${currentOs.fotosCount || 0})` : 'Anexar Fotos (ZIP)'}
                                         </button>
                                     `}
+                                    <button onClick=${finalizarCompleto} disabled=${finalizando} className=${`px-4 py-2 rounded-lg font-bold flex items-center gap-2 text-white shadow-md transition ${finalizando ? 'bg-slate-400 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700'}`}>
+                                        ${finalizando
+                                            ? html`<i className="ph ph-spinner animate-spin"></i> Enviando...`
+                                            : html`<i className="ph-bold ph-check-circle"></i> Finalizar e Enviar Tudo`}
+                                    </button>
                                 </div>
                             </div>
 
