@@ -2005,6 +2005,10 @@ Elabore um LAUDO TÉCNICO DE DIAGNÓSTICO E ANÁLISE completo e profissional, em
 
 NÃO invente defeitos que não foram informados. Use apenas os dados fornecidos. Se drone e carregador foram testados e estão OK, mencione na seção 1.
 
+ITENS OBRIGATÓRIOS em TODAS as análises, independentemente dos defeitos encontrados:
+- Seção 2 DEVE sempre conter um parágrafo sobre a saúde química das células: desgaste eletroquímico, capacidade residual, sincronia entre células e nível de envelhecimento, mesmo que as tensões estejam dentro do limite.
+- Seção 6 DEVE sempre conter: (a) status do selo de umidade e consequência para a garantia de fábrica; (b) aviso sobre risco de infiltração; (c) aviso de que podem ocorrer falhas secundárias após a manutenção.
+
 =========================
 ESTRUTURA OBRIGATÓRIA (siga este formato):
 =========================
@@ -2018,7 +2022,7 @@ Status: Aguardando Aprovação de Orçamento
 [Resultado do teste com Drone e Carregador, se informados]
 
 2. Diagnóstico Eletrônico e Químico:
-[Contagem de ciclos, voltage drop/equalização, e Parecer Técnico explicando a química/sincronia das células]
+[Contagem de ciclos, voltage drop/equalização, e Parecer Técnico explicando a química/sincronia das células. OBRIGATÓRIO: incluir sempre um parágrafo sobre a saúde química das células — desgaste eletroquímico das placas de lítio, capacidade residual estimada, grau de envelhecimento e sincronia eletroquímica entre células, explicando as implicações para a performance e segurança em voo.]
 
 3. Diagnóstico Físico e Estrutural:
 [Painel de controle/adesivos, vedação/borrachas, danos físicos — cada um com sua consequência]
@@ -2028,6 +2032,12 @@ Status: Aguardando Aprovação de Orçamento
 
 5. Protocolo de Testes:
 [Texto sobre testes de bancada/estresse e voo após os serviços, e ressalva de possível nova análise se houver fadiga das células]
+
+6. Garantia e Avisos Importantes:
+[SEMPRE incluir os três itens abaixo, mesmo que a bateria não apresente defeitos graves:]
+[a) Selo de Umidade: informar se o selo foi ativado (cor alterada) e que a ativação do selo de umidade anula automaticamente a garantia de fábrica DJI, pois indica que a bateria foi exposta a umidade ou condensação — condição excluída da cobertura do fabricante.]
+[b) Risco de Infiltração: alertar que qualquer comprometimento da vedação (borrachas, encaixes, adesivos) expõe o BMS e as células lítio-polímero a umidade e agentes químicos do campo (herbicidas, inseticidas), podendo causar corrosão interna, curto-circuito e risco de incêndio.]
+[c) Falhas Secundárias: esclarecer que em baterias com desgaste avançado ou que sofreram impacto/infiltração, após a intervenção técnica podem se manifestar falhas secundárias em componentes internos que já estavam comprometidos antes da manutenção — situação inerente ao estado prévio do equipamento e sem responsabilidade do Laboratório BioDron.]
 
 Lembramos sempre que o orçamento detalhado encontra-se em anexo no e-mail ou enviado pelo WhatsApp.
 
