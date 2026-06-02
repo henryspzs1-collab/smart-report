@@ -1271,6 +1271,198 @@ def omie_debug_call():
         return jsonify({"error": str(e), "endpoint": endpoint, "call": call, "param": param}), e.status
 
 
+# ===== CRM / Oportunidades — Fase 2: listar e puxar pro laudo =====
+# Fases do funil da conta BioDron (nCodFase → nome). Específico desta conta Omie.
+CRM_FASES = {
+    10843780550: "01 Em Análise",
+    10843780551: "02 Em Aprovação",
+    10843780552: "03 Em Preparação",
+    10843780553: "04 Finalizadas",
+    10843780554: "05 Pagos para envio",
+    10843780555: "06 Enviadas",
+}
+CRM_FASE_ANALISE = 10843780550
+CRM_FASE_PREPARACAO = 10843780552
+
+
+def _crm_parse_equipamento(c_des_op, c_obs):
+    """Extrai (serial, equipamento, defeito) da descrição/observações da oportunidade.
+    Prioriza marcadores estruturados do cObs; senão faz parsing heurístico do cDesOp.
+    Padrão comum do cDesOp: '<Nº Série> - <Equipamento> - <Defeito>'."""
+    c_des_op = (c_des_op or '').strip()
+    c_obs = (c_obs or '')
+    serial, equipamento, defeito = '', '', ''
+
+    # 1) cObs estruturado ("Modelo da Bateria: X ||Número de Série: Y||...")
+    if c_obs:
+        m_mod = re.search(r'Modelo[^:]*:\s*(.+?)\s*(?:\|\||$)', c_obs, re.IGNORECASE)
+        m_ser = re.search(r'N[úu]mero de S[ée]rie:\s*(.+?)\s*(?:\|\||$)', c_obs, re.IGNORECASE)
+        if m_mod:
+            equipamento = m_mod.group(1).strip()
+        if m_ser:
+            serial = m_ser.group(1).strip()
+
+    # 2) Parsing do cDesOp (Série - Equipamento - Defeito)
+    m = re.match(r'^\s*([A-Z0-9]{8,})\s*-\s*(.+?)\s*-\s*(.+)$', c_des_op)
+    if m:
+        if not serial:
+            serial = m.group(1).strip()
+        if not equipamento:
+            equipamento = m.group(2).strip()
+        defeito = m.group(3).strip()
+    else:
+        # Sem série detectável: tenta "Equipamento - Defeito"
+        partes = [p.strip() for p in re.split(r'\s+-\s+', c_des_op, maxsplit=1)]
+        if len(partes) == 2:
+            if not equipamento:
+                equipamento = partes[0]
+            defeito = partes[1]
+        else:
+            defeito = c_des_op
+
+    return serial, equipamento, defeito
+
+
+def _crm_resolver_conta(n_cod_conta):
+    """Consulta a Conta do CRM (nome, documento, contato). Retorna dict ou None."""
+    if not n_cod_conta:
+        return None
+    try:
+        data = omie_call('/crm/contas/', 'ConsultarConta', {"nCod": int(n_cod_conta)})
+    except OmieError:
+        return None
+    ident = data.get('identificacao', {}) or {}
+    tel = data.get('telefone_email', {}) or {}
+    return {
+        "nome": ident.get('cNome') or ident.get('cNomeFantasia') or '',
+        "doc": (ident.get('cDoc') or '').strip(),
+        "email": tel.get('cEmail') or '',
+        "phone": ((tel.get('cDDDTel') or '') + (tel.get('cNumTel') or '')).strip(),
+    }
+
+
+def _crm_buscar_cliente_faturamento(doc):
+    """Acha o cliente do cadastro de FATURAMENTO pelo CPF/CNPJ (pra criar OS/PV).
+    Retorna dict {omieClientId, name, document} ou None se não cadastrado."""
+    if not doc:
+        return None
+    doc_limpo = re.sub(r'\D', '', doc)
+    if not doc_limpo:
+        return None
+    try:
+        data = omie_call('/geral/clientes/', 'ListarClientes', {
+            "pagina": 1,
+            "registros_por_pagina": 5,
+            "apenas_importado_api": "N",
+            "clientesFiltro": {"cnpj_cpf": doc_limpo}
+        })
+    except (OmieError, OmieNoRecords):
+        return None
+    for c in data.get('clientes_cadastro', []):
+        return {
+            "omieClientId": c.get('codigo_cliente_omie'),
+            "name": c.get('razao_social') or c.get('nome_fantasia') or '',
+            "document": c.get('cnpj_cpf') or doc,
+        }
+    return None
+
+
+@app.route('/api/crm/oportunidades', methods=['GET'])
+def crm_listar_oportunidades():
+    """Lista oportunidades nas fases '01 Em Análise' e '03 Em Preparação'.
+    Filtro ?fase= opcional (codigo). Não resolve a conta de cada uma (lento);
+    isso é feito ao puxar uma oportunidade específica."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    fase_arg = request.args.get('fase')
+    fases = [int(fase_arg)] if fase_arg else [CRM_FASE_ANALISE, CRM_FASE_PREPARACAO]
+    items = []
+    erro = None
+    for fase in fases:
+        try:
+            data = omie_call('/crm/oportunidades/', 'ListarOportunidades', {
+                "pagina": 1,
+                "registros_por_pagina": 50,
+                "fase": fase
+            })
+        except OmieNoRecords:
+            continue
+        except OmieError as e:
+            erro = str(e)
+            continue
+        for op in data.get('cadastros', []):
+            ident = op.get('identificacao', {}) or {}
+            fs = op.get('fasesStatus', {}) or {}
+            tk = op.get('ticket', {}) or {}
+            outras = op.get('outrasInf', {}) or {}
+            items.append({
+                "nCodOp": ident.get('nCodOp'),
+                "cNumOp": ident.get('cNumOp') or '',
+                "descricao": ident.get('cDesOp') or '',
+                "nCodConta": ident.get('nCodConta'),
+                "faseCodigo": fs.get('nCodFase'),
+                "faseNome": CRM_FASES.get(fs.get('nCodFase'), '—'),
+                "ticket": {
+                    "produtos": tk.get('nProdutos') or 0,
+                    "servicos": tk.get('nServicos') or 0,
+                    "total": tk.get('nTicket') or 0,
+                },
+                "dInclusao": outras.get('dInclusao') or '',
+            })
+    if erro and not items:
+        return jsonify({"error": erro}), 502
+    return jsonify({"items": items, "total": len(items)})
+
+
+@app.route('/api/crm/oportunidade/<n_cod_op>', methods=['GET'])
+def crm_detalhe_oportunidade(n_cod_op):
+    """Consulta uma oportunidade e devolve dados prontos pra auto-preencher o laudo:
+    cliente (resolvido por documento), equipamento, série, defeito + cObs completo."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    try:
+        data = omie_call('/crm/oportunidades/', 'ConsultarOportunidade', {"nCodOp": int(n_cod_op)})
+    except OmieError as e:
+        return jsonify({"error": str(e)}), e.status
+
+    ident = data.get('identificacao', {}) or {}
+    fs = data.get('fasesStatus', {}) or {}
+    tk = data.get('ticket', {}) or {}
+    obs = (data.get('observacoes', {}) or {}).get('cObs', '') or ''
+    c_des_op = ident.get('cDesOp') or ''
+
+    conta = _crm_resolver_conta(ident.get('nCodConta'))
+    cliente_fat = _crm_buscar_cliente_faturamento(conta['doc']) if conta else None
+    serial, equipamento, defeito = _crm_parse_equipamento(c_des_op, obs)
+
+    # cObs vem com '||' e '|' como quebras de linha — normaliza pra leitura
+    obs_legivel = obs.replace('||', '\n').replace('|', '\n').strip()
+
+    return jsonify({
+        "nCodOp": ident.get('nCodOp'),
+        "cNumOp": ident.get('cNumOp') or '',
+        "faseCodigo": fs.get('nCodFase'),
+        "faseNome": CRM_FASES.get(fs.get('nCodFase'), '—'),
+        "ticket": {
+            "produtos": tk.get('nProdutos') or 0,
+            "servicos": tk.get('nServicos') or 0,
+            "total": tk.get('nTicket') or 0,
+        },
+        "conta": conta,
+        "cliente": cliente_fat,  # null se não tiver cadastro de faturamento
+        "laudo": {
+            "client": (cliente_fat or {}).get('name') or (conta or {}).get('nome') or '',
+            "model": equipamento,
+            "serial": serial,
+            "defect": defeito,
+        },
+        "descricao": c_des_op,
+        "observacoes": obs_legivel,
+    })
+
+
 @app.route('/api/omie/os/abertas', methods=['GET'])
 def omie_os_abertas():
     """Lista OSes do Omie que ainda não foram faturadas/canceladas, pra técnico importar e editar."""
