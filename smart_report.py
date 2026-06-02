@@ -3919,7 +3919,7 @@ HTML_PAGE = """
                 try {
                     const savedOs = await saveCurrentOs(true);
                     const osId = (savedOs && savedOs.id) || osAtual.id;
-                    const r1 = await fetch(\`/api/os/\${osId}/send\`, {
+                    const r1 = await fetch(`/api/os/${osId}/send`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json', 'Authorization': auth.token }
                     });
@@ -3941,14 +3941,14 @@ HTML_PAGE = """
                             questions: selectedModel ? selectedModel.questions : [],
                             diagrams: selectedModel ? selectedModel.diagrams : [],
                             diagramMarks, reportImages, logo,
-                            technician: (auth.firstName ? \`\${auth.firstName} \${auth.lastName||''}\` : auth.token).trim(),
+                            technician: (auth.firstName ? `${auth.firstName} ${auth.lastName||''}` : auth.token).trim(),
                             technicianSignature: headerData.technicianSignature,
                             showSignatures: headerData.showSignatures !== false,
                             modelName: selectedModel ? selectedModel.name : '',
                             cellAnalysis: selectedModel ? selectedModel.cellAnalysis : null,
                             cellVoltagesList: selectedModel ? (cellVoltages[selectedModel.id] || []) : []
                         };
-                        const r2 = await fetch(\`/api/os/\${osAtual.id}/gerar-pdf-anexar\`, {
+                        const r2 = await fetch(`/api/os/${osAtual.id}/gerar-pdf-anexar`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
                             body: JSON.stringify(pdfPayload)
@@ -3966,7 +3966,7 @@ HTML_PAGE = """
                 // Etapa 3: anexar fotos (apenas se houver fotos)
                 if (reportImages && reportImages.length > 0 && osAtual.omieOsId) {
                     try {
-                        const r3 = await fetch(\`/api/os/\${osAtual.id}/anexar-fotos\`, {
+                        const r3 = await fetch(`/api/os/${osAtual.id}/anexar-fotos`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
                             body: JSON.stringify({ photos: reportImages })
