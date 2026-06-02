@@ -1199,6 +1199,52 @@ def omie_debug_listaros():
         return jsonify({"error": str(e)}), e.status
 
 
+# ===== CRM / Oportunidades — Fase 1: descoberta da estrutura real =====
+@app.route('/api/omie/debug/oportunidades', methods=['GET'])
+def omie_debug_oportunidades():
+    """DESCOBERTA: lista oportunidades cruas do CRM Omie pra inspecionarmos os campos
+    reais (código da fase '01 - Em Análise', dados de cliente/contato, ticket).
+    Aceita ?pagina=, ?registros= e ?fase= (opcional) na query string."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    pagina = int(request.args.get('pagina', 1))
+    registros = int(request.args.get('registros', 20))
+    param = {
+        "pagina": pagina,
+        "registros_por_pagina": registros,
+        "apenas_importado_api": "N"
+    }
+    # Filtro de fase é opcional — só inclui se passado, pra primeiro vermos tudo
+    fase = request.args.get('fase')
+    if fase:
+        param["fase"] = int(fase)
+    try:
+        data = omie_call('/crm/oportunidades/', 'ListarOportunidades', param)
+        return jsonify(data)
+    except OmieNoRecords:
+        return jsonify({"empty": True, "msg": "Nenhuma oportunidade encontrada nessa página/fase."})
+    except OmieError as e:
+        return jsonify({"error": str(e), "param_enviado": param}), e.status
+
+
+@app.route('/api/omie/debug/oportunidade/<cod>', methods=['GET'])
+def omie_debug_oportunidade(cod):
+    """DESCOBERTA: consulta uma oportunidade específica pra ver TODOS os campos
+    (incluindo o ticket detalhado). Tenta nCodOp; se a Omie reclamar do nome,
+    o erro retornado nos diz o campo correto."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    try:
+        data = omie_call('/crm/oportunidades/', 'ConsultarOportunidade', {
+            "nCodOp": int(cod)
+        })
+        return jsonify(data)
+    except OmieError as e:
+        return jsonify({"error": str(e)}), e.status
+
+
 @app.route('/api/omie/os/abertas', methods=['GET'])
 def omie_os_abertas():
     """Lista OSes do Omie que ainda não foram faturadas/canceladas, pra técnico importar e editar."""
