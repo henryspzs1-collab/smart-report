@@ -455,6 +455,13 @@ def login():
     })
 
 
+@app.route('/api/logo', methods=['GET'])
+def public_logo():
+    """Retorna a logo pública (sem autenticação) para exibir na tela de login."""
+    full_data = load_data()
+    return jsonify({"logo": full_data.get('globalConfig', {}).get('logo')})
+
+
 @app.route('/api/logout', methods=['POST'])
 def logout():
     token = request.headers.get('Authorization')
@@ -3138,6 +3145,7 @@ HTML_PAGE = """
             const [isLoaded, setIsLoaded] = useState(false);
             const [isSaving, setIsSaving] = useState(false);
             const [loginError, setLoginError] = useState("");
+            const [publicLogo, setPublicLogo] = useState(null);
             const [authMode, setAuthMode] = useState('login'); // 'login' | 'register'
             const [registerMsg, setRegisterMsg] = useState({ type: '', text: '' });
             const [mustChangePwd, setMustChangePwd] = useState(false);
@@ -3191,6 +3199,10 @@ HTML_PAGE = """
             const [produtoResults, setProdutoResults] = useState([]);
             const [osSendError, setOsSendError] = useState('');
             const [finalizando, setFinalizando] = useState(false);
+
+            useEffect(() => {
+                fetch('/api/logo').then(r => r.json()).then(d => { if (d.logo) setPublicLogo(d.logo); }).catch(() => {});
+            }, []);
 
             useEffect(() => {
                 const storedPending = localStorage.getItem('smartReportPendingImages');
@@ -3784,7 +3796,9 @@ HTML_PAGE = """
                     <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
                         <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-md">
                             <div className="text-center mb-6">
-                                <i className="ph-fill ph-device-mobile text-blue-600 text-5xl mb-2"></i>
+                                ${publicLogo
+                                    ? html`<img src=${publicLogo} alt="BioDron" className="h-16 w-auto object-contain mx-auto mb-3" />`
+                                    : html`<i className="ph-fill ph-device-mobile text-blue-600 text-5xl mb-2"></i>`}
                                 <h1 className="text-2xl font-bold text-slate-800">Biodron Smart Report Pro</h1>
                                 <p className="text-sm text-slate-500">${authMode === 'login' ? 'Faça login para acessar seu painel' : 'Crie sua conta — aguarde aprovação do administrador'}</p>
                             </div>
@@ -5569,12 +5583,17 @@ HTML_PAGE = """
                     ${renderPrintView()}
                     <div className="print:hidden max-w-5xl mx-auto p-4 md:p-6 pb-24">
                         <header className="mb-6 flex flex-col md:flex-row md:items-center justify-between gap-4 bg-slate-900 text-white p-4 md:p-6 rounded-2xl shadow-lg">
-                            <div className="flex flex-col">
-                                <h1 className="text-2xl font-bold flex items-center gap-2"><i className="ph-fill ph-device-mobile text-blue-400"></i> Biodron Smart Report Pro</h1>
-                                <span className="text-slate-400 text-sm mt-1 flex items-center gap-2">
-                                    <i className="ph-fill ph-user-circle"></i> Olá, <b className="text-white">${auth.username || auth.firstName || 'usuário'}</b>
-                                    <button onClick=${handleLogout} className="ml-2 text-red-400 hover:text-red-300 underline font-medium text-xs">Sair da Conta</button>
-                                </span>
+                            <div className="flex items-center gap-4">
+                                ${logo
+                                    ? html`<img src=${logo} alt="BioDron" className="h-12 w-auto object-contain flex-shrink-0" />`
+                                    : html`<i className="ph-fill ph-device-mobile text-blue-400 text-4xl flex-shrink-0"></i>`}
+                                <div className="flex flex-col">
+                                    <h1 className="text-2xl font-bold">Biodron Smart Report Pro</h1>
+                                    <span className="text-slate-400 text-sm mt-0.5 flex items-center gap-2">
+                                        <i className="ph-fill ph-user-circle"></i> Olá, <b className="text-white">${auth.username || auth.firstName || 'usuário'}</b>
+                                        <button onClick=${handleLogout} className="ml-2 text-red-400 hover:text-red-300 underline font-medium text-xs">Sair da Conta</button>
+                                    </span>
+                                </div>
                             </div>
                             <div className="flex gap-2 flex-wrap">
                                 <button onClick=${gerarTextoIA} className="px-3 py-2 bg-gradient-to-r from-purple-600 to-fuchsia-600 rounded-lg text-sm font-medium hover:from-purple-500 hover:to-fuchsia-500 transition flex items-center gap-1 shadow-md"><i className="ph-bold ph-sparkle"></i> Laudo IA</button>
