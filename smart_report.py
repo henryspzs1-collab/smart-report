@@ -4329,6 +4329,7 @@ HTML_PAGE = """
                 setFinalizando(true);
                 setOsSendError('');
                 const erros = [];
+                const avisos = [];
                 let osAtual = currentOs;
 
                 // Etapa 1: salvar + enviar/atualizar OS no Omie
@@ -4343,6 +4344,8 @@ HTML_PAGE = """
                     if (d1.omieOsId || d1.omieOsNumber) {
                         osAtual = { ...osAtual, ...d1 };
                         setCurrentOs(osAtual);
+                        // O Pedido de Venda das peças pode falhar sem derrubar a OS — captura o aviso.
+                        if (d1.warning) avisos.push(d1.warning);
                     } else {
                         erros.push('Omie: ' + (d1.error || 'erro ao enviar OS'));
                     }
@@ -4399,7 +4402,6 @@ HTML_PAGE = """
 
                 // Etapa 4 (CRM): se a OS veio de uma oportunidade, move a fase e coleta os números
                 let crmInfo = null;
-                const avisos = [];
                 if (osAtual.crmOpId) {
                     try {
                         const r4 = await fetch(`/api/os/${osAtual.id}/crm-finalizar`, {
