@@ -4514,7 +4514,7 @@ HTML_PAGE = """
                                     return html`
                                         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                                             <div className="md:col-span-2">
-                                                <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
+                                                <div className="grid gap-3" style=${{ gridTemplateRows: `repeat(${Math.ceil(numCells/4)}, auto)`, gridAutoFlow: 'column' }}>
                                                     ${Array.from({ length: numCells }, (_, i) => html`
                                                         <div key=${i} className="flex items-center gap-1.5">
                                                             <span className="text-xs font-bold text-slate-400 w-5 text-right">${i+1}</span>
