@@ -1284,6 +1284,36 @@ CRM_FASES = {
 CRM_FASE_ANALISE = 10843780550
 CRM_FASE_PREPARACAO = 10843780552
 
+# Pra qual fase a oportunidade vai quando o técnico finaliza (gera OS+orçamento):
+# 01 Em Análise → 02 Em Aprovação ; 03 Em Preparação → 04 Finalizadas.
+CRM_FASE_DESTINO_FINALIZACAO = {
+    10843780550: 10843780551,
+    10843780552: 10843780553,
+}
+
+
+def _incluir_anexo_omie(c_tabela, n_id, filename, tipo, arquivo_b64, md5, tag):
+    """Inclui um anexo (já zipado+base64) em qualquer tabela do Omie (OS ou oportunidade).
+    Lança OmieError em falha."""
+    cod_int = f"{tag}_{n_id}_{int(datetime.utcnow().timestamp())}"[:20]
+    omie_call('/geral/anexo/', 'IncluirAnexo', {
+        "cCodIntAnexo": cod_int,
+        "cTabela": c_tabela,
+        "nId": n_id,
+        "cNomeArquivo": filename,
+        "cTipoArquivo": tipo,
+        "cArquivo": arquivo_b64,
+        "cMd5": md5
+    })
+
+
+def _mover_fase_oportunidade(n_cod_op, nova_fase):
+    """Move uma oportunidade do CRM para outra fase. Lança OmieError em falha."""
+    return omie_call('/crm/oportunidades/', 'AlterarOportunidade', {
+        "identificacao": {"nCodOp": int(n_cod_op)},
+        "fasesStatus": {"nCodFase": int(nova_fase)}
+    })
+
 
 def _crm_parse_equipamento(c_des_op, c_obs):
     """Extrai (serial, equipamento, defeito) da descrição/observações da oportunidade.
@@ -2954,10 +2984,19 @@ def os_gerar_pdf_anexar(os_id):
         })
         draft['pdfAnexado'] = True
         draft['pdfAnexadoAt'] = datetime.utcnow().isoformat() + "Z"
-        save_data(full_data)
-        return jsonify({"success": True})
     except OmieError as e:
         return jsonify({"error": str(e)}), e.status
+
+    # Se a OS veio de uma oportunidade do CRM, anexa o mesmo laudo NA OPORTUNIDADE também.
+    if draft.get('crmOpId'):
+        try:
+            _incluir_anexo_omie('crm-oportunidades', draft['crmOpId'], filename, 'pdf', zip_b64, md5_hash, 'opx')
+            draft['pdfAnexadoOp'] = True
+        except OmieError as e:
+            draft['crmAnexoWarning'] = f"PDF anexado na OS, mas falhou na oportunidade: {e}"
+
+    save_data(full_data)
+    return jsonify({"success": True})
 
 
 @app.route('/api/os/<os_id>/anexar', methods=['POST'])
@@ -3096,10 +3135,60 @@ def os_anexar_fotos(os_id):
         draft['fotosAnexadas'] = True
         draft['fotosAnexadasAt'] = datetime.utcnow().isoformat() + "Z"
         draft['fotosCount'] = fotos_count
-        save_data(full_data)
-        return jsonify({"success": True, "count": fotos_count})
     except OmieError as e:
         return jsonify({"error": str(e)}), e.status
+
+    # Se veio de oportunidade do CRM, anexa as fotos NA OPORTUNIDADE também.
+    if draft.get('crmOpId'):
+        try:
+            _incluir_anexo_omie('crm-oportunidades', draft['crmOpId'], filename, 'zip', outer_b64, md5_hash, 'fop')
+            draft['fotosAnexadasOp'] = True
+        except OmieError as e:
+            draft['crmAnexoWarning'] = f"Fotos anexadas na OS, mas falhou na oportunidade: {e}"
+
+    save_data(full_data)
+    return jsonify({"success": True, "count": fotos_count})
+
+
+@app.route('/api/os/<os_id>/crm-finalizar', methods=['POST'])
+def os_crm_finalizar(os_id):
+    """Finaliza o vínculo com a oportunidade do CRM: move a fase (Análise→Aprovação,
+    Preparação→Finalizadas) e devolve os números de Oportunidade, OS e PV."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    owner, draft = _find_filial_draft(full_data, user, os_id)
+    if not draft:
+        return jsonify({"error": "Rascunho não encontrado"}), 404
+    if not draft.get('crmOpId'):
+        return jsonify({"error": "Esta OS não está vinculada a uma oportunidade do CRM."}), 400
+
+    fase_atual = draft.get('crmFaseCodigo')
+    nova_fase = CRM_FASE_DESTINO_FINALIZACAO.get(fase_atual)
+    fase_movida = False
+    fase_warning = None
+    if nova_fase:
+        try:
+            _mover_fase_oportunidade(draft['crmOpId'], nova_fase)
+            draft['crmFaseCodigo'] = nova_fase
+            fase_movida = True
+        except OmieError as e:
+            fase_warning = f"Não consegui mover a fase da oportunidade: {e}"
+    else:
+        fase_warning = f"Fase atual ({CRM_FASES.get(fase_atual, fase_atual)}) não tem transição automática definida."
+
+    draft['crmFinalizadoAt'] = datetime.utcnow().isoformat() + "Z"
+    save_data(full_data)
+    return jsonify({
+        "success": True,
+        "oportunidade": draft.get('crmOpNum') or draft.get('crmOpId'),
+        "osNumero": draft.get('omieOsNumber'),
+        "pvNumero": draft.get('pedidoVendaNumero'),
+        "faseMovida": fase_movida,
+        "faseNova": CRM_FASES.get(nova_fase, '') if nova_fase else '',
+        "warning": fase_warning,
+        "anexoWarning": draft.get('crmAnexoWarning'),
+    })
 
 
 def _criar_ou_atualizar_pedido_venda(draft, parts_validas, nCodCC):
@@ -4308,11 +4397,42 @@ HTML_PAGE = """
                     } catch (e) { erros.push('Fotos: ' + (e.message || e)); }
                 }
 
+                // Etapa 4 (CRM): se a OS veio de uma oportunidade, move a fase e coleta os números
+                let crmInfo = null;
+                const avisos = [];
+                if (osAtual.crmOpId) {
+                    try {
+                        const r4 = await fetch(`/api/os/${osAtual.id}/crm-finalizar`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'Authorization': auth.token }
+                        });
+                        const d4 = await r4.json();
+                        if (d4.success) {
+                            crmInfo = d4;
+                            if (d4.warning) avisos.push(d4.warning);
+                            if (d4.anexoWarning) avisos.push(d4.anexoWarning);
+                        } else {
+                            erros.push('CRM: ' + (d4.error || 'erro ao finalizar oportunidade'));
+                        }
+                    } catch (e) { erros.push('CRM: ' + (e.message || e)); }
+                }
+
                 setFinalizando(false);
                 fetchOsDrafts();
 
                 if (erros.length) {
                     alert('Concluído com erros:\\n' + erros.join('\\n') + '\\n\\nVerifique e tente as etapas individualmente.');
+                } else if (crmInfo) {
+                    let msg = 'Processo concluído com sucesso!\\n\\n';
+                    msg += `Oportunidade: ${crmInfo.oportunidade || '—'}\\n`;
+                    msg += `Ordem de Serviço: ${crmInfo.osNumero || '—'}\\n`;
+                    msg += `Pedido de Venda: ${crmInfo.pvNumero || '— (sem peças)'}`;
+                    if (crmInfo.faseMovida) msg += `\\n\\nOportunidade movida para: ${crmInfo.faseNova}`;
+                    if (avisos.length) msg += '\\n\\n⚠️ ' + avisos.join('\\n⚠️ ');
+                    msg += '\\n\\nOs dados do laudo serão limpos.';
+                    alert(msg);
+                    clearCurrentReport();
+                    setCurrentOs(null);
                 } else {
                     alert('Tudo enviado com sucesso! OS atualizada, PDF e fotos anexados no Omie.\\n\\nOs dados do laudo serão limpos.');
                     clearCurrentReport();
