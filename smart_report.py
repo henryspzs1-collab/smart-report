@@ -3415,6 +3415,10 @@ HTML_PAGE = """
             const [mustChangePwd, setMustChangePwd] = useState(false);
             const [pwdChangeMsg, setPwdChangeMsg] = useState("");
             const [tempPasswordInfo, setTempPasswordInfo] = useState(null); // {username, password}
+            const [crmOps, setCrmOps] = useState([]);
+            const [loadingCrm, setLoadingCrm] = useState(false);
+            const [crmFiltro, setCrmFiltro] = useState('todas'); // todas | analise | preparacao
+            const [puxandoCrm, setPuxandoCrm] = useState(null); // nCodOp sendo puxado
 
             // DADOS GLOBAIS (Admin dita as regras)
             const [headerConfig, setHeaderConfig] = useState([]);
@@ -3636,6 +3640,47 @@ HTML_PAGE = """
                     if (!currentOs) fetchOmieAbertas();
                 }
             }, [activeTab, auth, currentOs]);
+
+            // ---- CRM / Oportunidades ----
+            const fetchCrmOportunidades = () => {
+                setLoadingCrm(true);
+                fetch('/api/crm/oportunidades', { headers: { 'Authorization': auth.token } })
+                    .then(r => r.json()).then(d => {
+                        setCrmOps(d.items || []);
+                        setLoadingCrm(false);
+                    }).catch(() => setLoadingCrm(false));
+            };
+
+            useEffect(() => {
+                if (auth && activeTab === 'crm' && crmOps.length === 0) fetchCrmOportunidades();
+            }, [activeTab, auth]);
+
+            const puxarOportunidadeParaLaudo = async (nCodOp) => {
+                setPuxandoCrm(nCodOp);
+                try {
+                    const d = await fetch(`/api/crm/oportunidade/${nCodOp}`, { headers: { 'Authorization': auth.token } }).then(r => r.json());
+                    if (d.error) { alert('Erro ao puxar oportunidade: ' + d.error); return; }
+                    const patch = {};
+                    const setField = (id, val) => { const f = headerConfig.find(x => x.id === id); if (f && val) patch[id] = val; };
+                    setField('client', d.laudo.client);
+                    setField('model', d.laudo.model);
+                    setField('serial', d.laudo.serial);
+                    setField('defect', d.laudo.defect);
+                    // Vínculo com a oportunidade (usado na finalização — Fase 3)
+                    patch.crmOpId = d.nCodOp;
+                    patch.crmOpNum = d.cNumOp;
+                    patch.crmFaseCodigo = d.faseCodigo;
+                    patch.crmClienteOmieId = d.cliente ? d.cliente.omieClientId : null;
+                    setHeaderData(prev => ({ ...prev, ...patch }));
+                    setActiveTab('report');
+                    const semCad = d.cliente ? '' : '\\n\\n(Atenção: cliente ainda não tem cadastro de faturamento — selecione/cadastre ao gerar a OS.)';
+                    alert(`Laudo pré-preenchido da oportunidade ${d.cNumOp}.\\n\\nCliente: ${d.laudo.client}\\nEquipamento: ${d.laudo.model || '—'}\\nSérie: ${d.laudo.serial || '—'}` + semCad);
+                } catch (e) {
+                    alert('Erro de rede: ' + (e.message || e));
+                } finally {
+                    setPuxandoCrm(null);
+                }
+            };
 
             // ---- helpers OS ----
             const createNewOs = (prefill = {}) => {
@@ -5433,6 +5478,67 @@ HTML_PAGE = """
                 `;
             };
 
+            const renderCRM = () => {
+                const opsFiltradas = crmOps.filter(o => {
+                    if (crmFiltro === 'analise') return o.faseCodigo === 10843780550;
+                    if (crmFiltro === 'preparacao') return o.faseCodigo === 10843780552;
+                    return true;
+                });
+                const fmt = (v) => 'R$ ' + parseFloat(v || 0).toFixed(2);
+                return html`
+                    <div className="space-y-4 animate-in fade-in duration-300">
+                        <div className="bg-white p-4 rounded-xl border border-slate-200 flex flex-col md:flex-row md:items-center gap-3 justify-between">
+                            <div>
+                                <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2"><i className="ph-fill ph-funnel text-amber-600 text-2xl"></i> Oportunidades do CRM</h2>
+                                <p className="text-sm text-slate-500 mt-1">Oportunidades criadas pelo vendedor. Carregue uma pra iniciar o laudo com os dados já preenchidos.</p>
+                            </div>
+                            <button onClick=${fetchCrmOportunidades} disabled=${loadingCrm} className="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg font-medium flex items-center gap-2 whitespace-nowrap disabled:bg-slate-400">
+                                <i className=${`ph-bold ph-arrows-clockwise ${loadingCrm ? 'animate-spin' : ''}`}></i> ${loadingCrm ? 'Carregando...' : 'Atualizar'}
+                            </button>
+                        </div>
+
+                        <div className="flex gap-2 flex-wrap">
+                            ${[['todas', 'Todas'], ['analise', '01 Em Análise'], ['preparacao', '03 Em Preparação']].map(([k, label]) => html`
+                                <button key=${k} onClick=${() => setCrmFiltro(k)} className=${`px-3 py-1.5 rounded-lg text-sm font-medium transition ${crmFiltro === k ? 'bg-amber-600 text-white' : 'bg-white border border-slate-300 text-slate-600 hover:bg-slate-100'}`}>${label}</button>
+                            `)}
+                        </div>
+
+                        ${opsFiltradas.length === 0 && !loadingCrm ? html`
+                            <div className="text-center py-10 text-sm text-slate-400 bg-white rounded-xl border border-slate-200">Nenhuma oportunidade nessa fase.</div>
+                        ` : html`
+                            <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+                                <table className="min-w-full text-sm">
+                                    <thead className="bg-amber-50 text-slate-700">
+                                        <tr>
+                                            <th className="p-3 text-left">Nº</th>
+                                            <th className="p-3 text-left">Descrição (equipamento / defeito)</th>
+                                            <th className="p-3 text-left">Fase</th>
+                                            <th className="p-3 text-right">Ticket</th>
+                                            <th className="p-3 text-right">Ação</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100">
+                                        ${opsFiltradas.map(o => html`
+                                            <tr key=${o.nCodOp} className="hover:bg-slate-50">
+                                                <td className="p-3 font-mono text-xs whitespace-nowrap">${o.cNumOp || '—'}</td>
+                                                <td className="p-3 text-xs max-w-md"><div className="text-slate-800">${o.descricao || '—'}</div><div className="text-slate-400 mt-0.5">inclusão: ${o.dInclusao || '—'}</div></td>
+                                                <td className="p-3"><span className=${`px-2 py-0.5 rounded text-xs font-bold ${o.faseCodigo === 10843780550 ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'}`}>${o.faseNome}</span></td>
+                                                <td className="p-3 text-xs text-right whitespace-nowrap">${o.ticket.total ? fmt(o.ticket.total) : '—'}</td>
+                                                <td className="p-3 text-right">
+                                                    <button onClick=${() => puxarOportunidadeParaLaudo(o.nCodOp)} disabled=${puxandoCrm === o.nCodOp} className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded text-xs font-medium whitespace-nowrap disabled:bg-slate-400">
+                                                        ${puxandoCrm === o.nCodOp ? html`<i className="ph ph-spinner animate-spin"></i> Carregando...` : html`<i className="ph-bold ph-file-text"></i> Carregar laudo`}
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                        `)}
+                                    </tbody>
+                                </table>
+                            </div>
+                        `}
+                    </div>
+                `;
+            };
+
             const renderOS = () => {
                 // Tela de edição de uma OS específica
                 if (currentOs) {
@@ -5878,6 +5984,7 @@ HTML_PAGE = """
                         <div className="flex space-x-1 mb-6 bg-slate-200 p-1 rounded-xl w-full md:w-fit overflow-x-auto scrollbar-hide">
                             <button onClick=${() => setActiveTab('report')} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'report' ? 'bg-white text-blue-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}><i className="ph-bold ph-file-text"></i> Preencher Laudo</button>
                             <button onClick=${() => { setActiveTab('os'); setCurrentOs(null); }} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'os' ? 'bg-white text-indigo-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}><i className="ph-bold ph-clipboard-text"></i> Ordens de Serviço</button>
+                            <button onClick=${() => setActiveTab('crm')} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'crm' ? 'bg-white text-amber-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}><i className="ph-bold ph-funnel"></i> Oportunidades (CRM)</button>
 
                             ${auth.role === 'admin' && html`
                                 <button onClick=${() => setActiveTab('settings')} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'settings' ? 'bg-white text-indigo-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}><i className="ph-bold ph-gear"></i> Templates (Global)</button>
@@ -5888,6 +5995,7 @@ HTML_PAGE = """
                         <main>
                             ${activeTab === 'report' ? renderReportForm() : ''}
                             ${activeTab === 'os' ? renderOS() : ''}
+                            ${activeTab === 'crm' ? renderCRM() : ''}
                             ${activeTab === 'settings' && auth.role === 'admin' ? renderSettings() : ''}
                             ${activeTab === 'users' && auth.role === 'admin' ? renderUsers() : ''}
                         </main>
