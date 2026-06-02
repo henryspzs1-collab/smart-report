@@ -3985,9 +3985,9 @@ HTML_PAGE = """
                 fetchOsDrafts();
 
                 if (erros.length) {
-                    alert('Concluído com erros:\n' + erros.join('\n') + '\n\nVerifique e tente as etapas individualmente.');
+                    alert('Concluído com erros:\\n' + erros.join('\\n') + '\\n\\nVerifique e tente as etapas individualmente.');
                 } else {
-                    alert('Tudo enviado com sucesso! OS atualizada, PDF e fotos anexados no Omie.\n\nOs dados do laudo serão limpos.');
+                    alert('Tudo enviado com sucesso! OS atualizada, PDF e fotos anexados no Omie.\\n\\nOs dados do laudo serão limpos.');
                     clearCurrentReport();
                     setCurrentOs(null);
                 }
