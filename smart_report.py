@@ -3560,10 +3560,17 @@ HTML_PAGE = """
                     if (clientField && currentOs.client?.name) {
                         patch[clientField.id] = currentOs.client.name;
                     }
-                    if (defectField && currentOs.observations) {
+                    if (defectField) {
+                        // Puxa a "Descrição detalhada do Serviço" (preenchida pelo vendedor no Omie)
+                        // de todos os serviços; se não houver, cai pra observações da OS.
+                        const descServicos = (currentOs.services || [])
+                            .map(s => (s.description || '').trim())
+                            .filter(Boolean)
+                            .join('\\n\\n');
+                        const fonteDefeito = descServicos || currentOs.observations || '';
                         // Só sobrescreve defect se estiver vazio (não atropela o que técnico já preencheu)
-                        if (!headerData[defectField.id]) {
-                            patch[defectField.id] = currentOs.observations;
+                        if (fonteDefeito && !headerData[defectField.id]) {
+                            patch[defectField.id] = fonteDefeito;
                         }
                     }
                     if (Object.keys(patch).length > 0) {
