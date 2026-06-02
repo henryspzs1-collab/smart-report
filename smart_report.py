@@ -2748,6 +2748,7 @@ def os_anexar_fotos(os_id):
     fotos = body.get('photos') or []
     if not fotos:
         return jsonify({"error": "Nenhuma foto fornecida"}), 400
+    fotos_count = len(fotos)
 
     # Cria ZIP com todas as fotos. Libera cada foto da memória logo após zipar (poupa RAM no plano 512MB).
     zip_buf = io.BytesIO()
@@ -2795,7 +2796,7 @@ def os_anexar_fotos(os_id):
     outer_bytes = None
     # Omie espera MD5 da STRING base64 (não dos bytes binários)
     md5_hash = hashlib.md5(outer_b64.encode('ascii')).hexdigest()
-    print(f"[ANEXAR-FOTOS] outer_size={len(outer_bytes)} b64_size={len(outer_b64)} md5={md5_hash}", flush=True)
+    print(f"[ANEXAR-FOTOS] b64_size={len(outer_b64)} md5={md5_hash}", flush=True)
 
     cod_int = f"fts_{os_id}_{int(datetime.utcnow().timestamp())}"[:20]
     try:
@@ -2810,9 +2811,9 @@ def os_anexar_fotos(os_id):
         })
         draft['fotosAnexadas'] = True
         draft['fotosAnexadasAt'] = datetime.utcnow().isoformat() + "Z"
-        draft['fotosCount'] = len(fotos)
+        draft['fotosCount'] = fotos_count
         save_data(full_data)
-        return jsonify({"success": True, "count": len(fotos)})
+        return jsonify({"success": True, "count": fotos_count})
     except OmieError as e:
         return jsonify({"error": str(e)}), e.status
 
