@@ -3218,7 +3218,9 @@ def _criar_ou_atualizar_pedido_venda(draft, parts_validas, nCodCC):
     for cod in ordem:
         info = agrup[cod]
         det.append({
-            "ide": {"codigo_item_integracao": f"{draft['id']}-{cod}"[:60]},
+            # codigo_item_integracao: máx 30 chars no Omie. Como agrupamos por produto,
+            # o próprio código do produto já é único dentro do pedido.
+            "ide": {"codigo_item_integracao": f"i{cod}"[:30]},
             "produto": {
                 "codigo_produto": cod,
                 "quantidade": info["quantidade"],
@@ -3228,7 +3230,7 @@ def _criar_ou_atualizar_pedido_venda(draft, parts_validas, nCodCC):
 
     cabecalho = {
         "codigo_cliente": int(cli.get('omieClientId')),
-        "codigo_pedido_integracao": f"sr-{draft['id']}"[:60],
+        "codigo_pedido_integracao": f"sr-{draft['id']}"[:30],
         "data_previsao": datetime.utcnow().strftime("%d/%m/%Y"),
         "etapa": "10",
         "codigo_parcela": "000",  # à vista
