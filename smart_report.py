@@ -2653,6 +2653,112 @@ def _gerar_pdf_laudo(payload):
         except Exception as e:
             print(f"[CELL ANALYSIS] erro ao gerar: {e}", flush=True)
 
+    # ---- Análise de Resistência dos Motores ----
+    motor_analysis = payload.get('motorAnalysis')  # { enabled, numMotors, curtoMax, baixaCriticaMax }
+    motor_list = payload.get('motorResistancesList') or []
+    if motor_analysis and motor_analysis.get('enabled') and any((str(x).strip() for x in motor_list)):
+        try:
+            num_motors = min(int(motor_analysis.get('numMotors') or 8), 8)
+            curto_max = float(motor_analysis.get('curtoMax') or 0.05)
+            baixa_max = float(motor_analysis.get('baixaCriticaMax') or 0.15)
+
+            def _classifica_motor(v):
+                if v is None:
+                    return '—', None
+                if v <= curto_max:
+                    return 'Curto', '#991b1b'
+                if v <= baixa_max:
+                    return 'Baixa Crítica', '#f97316'
+                return 'Normal', '#10b981'
+
+            counts = {'Curto': 0, 'Baixa Crítica': 0, 'Normal': 0}
+            rows = [['Motor', 'Resistência (Ω)', 'Status']]
+            row_colors = []
+            for i in range(num_motors):
+                raw = motor_list[i] if i < len(motor_list) else ''
+                try:
+                    v = float(raw)
+                except Exception:
+                    v = None
+                label, hexc = _classifica_motor(v)
+                if label in counts:
+                    counts[label] += 1
+                if v is None:
+                    rows.append([f"M{i+1}", '—', '—'])
+                else:
+                    rows.append([f"M{i+1}", f"{v:.3f}", label])
+                row_colors.append(hexc)
+
+            story.append(PageBreak())
+            story.append(secao('Análise de Resistência dos Motores'))
+            story.append(Spacer(1, 3*mm))
+
+            # Resumo (contagens) + limites configurados, lado a lado
+            resumo_pairs = [
+                ('Motores avaliados', str(num_motors)),
+                ('Em curto', str(counts['Curto'])),
+                ('Baixa crítica', str(counts['Baixa Crítica'])),
+                ('Normais', str(counts['Normal'])),
+            ]
+            resumo_rows = [[Paragraph(f'<b>{k}</b>', small), Paragraph(f'<font name="Helvetica-Bold">{v}</font>', body)] for k, v in resumo_pairs]
+            resumo_table = Table(resumo_rows, colWidths=[45*mm, 40*mm])
+            rstyle = [
+                ('LINEBELOW', (0,0), (-1,-1), 0.3, C_BORDER),
+                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                ('TOPPADDING', (0,0), (-1,-1), 4),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+                ('LEFTPADDING', (0,0), (-1,-1), 6),
+            ]
+            for ri in range(len(resumo_rows)):
+                if ri % 2 == 1:
+                    rstyle.append(('BACKGROUND', (0,ri), (-1,ri), C_LIGHT))
+            resumo_table.setStyle(TableStyle(rstyle))
+
+            tem_problema = counts['Curto'] > 0 or counts['Baixa Crítica'] > 0
+            diag_hex = '#991b1b' if counts['Curto'] > 0 else ('#f97316' if counts['Baixa Crítica'] > 0 else '#10b981')
+            diag_label = 'Curto detectado' if counts['Curto'] > 0 else ('Baixa resistência crítica' if counts['Baixa Crítica'] > 0 else 'Motores normais')
+            status_card = Table([
+                [Paragraph('<font color="#6b7280" size=8>DIAGNÓSTICO DOS MOTORES</font>', small)],
+                [Paragraph(f'<b><font color="{diag_hex}" size=15>{diag_label}</font></b>', body)],
+                [Paragraph(f'<font color="#6b7280" size=8>Curto ≤ {curto_max:.3f}Ω · Baixa crítica ≤ {baixa_max:.3f}Ω</font>', small)],
+            ], colWidths=[80*mm])
+            status_card.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,-1), C_LIGHT),
+                ('BOX', (0,0), (-1,-1), 1.2, colors.HexColor(diag_hex)),
+                ('TOPPADDING', (0,0), (-1,-1), 6),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+                ('LEFTPADDING', (0,0), (-1,-1), 12),
+            ]))
+            combo = Table([[resumo_table, status_card]], colWidths=[90*mm, 90*mm])
+            combo.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP')]))
+            story.append(combo)
+            story.append(Spacer(1, 5*mm))
+
+            motors_table = Table(rows, colWidths=[30*mm, 53*mm, 53*mm], repeatRows=1)
+            mstyle = [
+                ('BACKGROUND', (0,0), (-1,0), C_DARK),
+                ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+                ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                ('FONTSIZE', (0,0), (-1,-1), 9),
+                ('TOPPADDING', (0,0), (-1,-1), 4),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+                ('LINEBELOW', (0,0), (-1,-1), 0.3, C_BORDER),
+            ]
+            for ri in range(1, len(rows)):
+                if ri % 2 == 0:
+                    mstyle.append(('BACKGROUND', (0,ri), (-1,ri), C_LIGHT))
+                rc = row_colors[ri-1]
+                if rc:
+                    mstyle.append(('TEXTCOLOR', (2,ri), (2,ri), colors.HexColor(rc)))
+                    mstyle.append(('FONTNAME', (2,ri), (2,ri), 'Helvetica-Bold'))
+            motors_table.setStyle(TableStyle(mstyle))
+            story.append(motors_table)
+            story.append(Spacer(1, 4*mm))
+        except Exception as e:
+            print(f"[MOTOR ANALYSIS] erro ao gerar: {e}", flush=True)
+
     # ---- Diagramas com marcações ----
     if diagrams:
         story.append(secao('Mapeamento Visual'))
@@ -3506,6 +3612,7 @@ HTML_PAGE = """
             const [reportImages, setReportImages] = useState([]);
             const [pdfMargin, setPdfMargin] = useState('1.5cm');
             const [cellVoltages, setCellVoltages] = useState({}); // { modelId: ["3.85", "3.86", ...] }
+            const [motorResistances, setMotorResistances] = useState({}); // { modelId: ["0.120", "0.118", ...] }
             const [laudosList, setLaudosList] = useState([]);
             const [laudosModalOpen, setLaudosModalOpen] = useState(false);
             const [iaModalOpen, setIaModalOpen] = useState(false);
@@ -3585,6 +3692,7 @@ HTML_PAGE = """
                         setReportImages(data.userState.reportImages || []);
                         setPdfMargin(data.userState.pdfMargin || '1.5cm');
                         setCellVoltages(data.userState.cellVoltages || {});
+                        setMotorResistances(data.userState.motorResistances || {});
 
                         if(loadedModels.length > 0) setEditingModelId(loadedModels[0].id);
                         setIsLoaded(true);
@@ -3597,7 +3705,7 @@ HTML_PAGE = """
                 setIsSaving(true);
                 const timer = setTimeout(() => {
                     const payload = {
-                        userState: { headerData, answers, diagramMarks, reportImages, pdfMargin, cellVoltages }
+                        userState: { headerData, answers, diagramMarks, reportImages, pdfMargin, cellVoltages, motorResistances }
                     };
 
                     // Se for admin, salva as configurações globais também
@@ -3618,7 +3726,7 @@ HTML_PAGE = """
                     });
                 }, 1000);
                 return () => clearTimeout(timer);
-            }, [headerConfig, headerData, models, answers, diagramMarks, logo, reportImages, pdfMargin, cellVoltages, isLoaded, auth]);
+            }, [headerConfig, headerData, models, answers, diagramMarks, logo, reportImages, pdfMargin, cellVoltages, motorResistances, isLoaded, auth]);
 
             // Salva status temp de fotos antes da câmera abrir
             useEffect(() => {
@@ -4079,7 +4187,9 @@ HTML_PAGE = """
                     showSignatures: headerData.showSignatures !== false,
                     modelName: selectedModel ? selectedModel.name : '',
                     cellAnalysis: selectedModel ? selectedModel.cellAnalysis : null,
-                    cellVoltagesList: selectedModel ? (cellVoltages[selectedModel.id] || []) : []
+                    cellVoltagesList: selectedModel ? (cellVoltages[selectedModel.id] || []) : [],
+                    motorAnalysis: selectedModel ? selectedModel.motorAnalysis : null,
+                    motorResistancesList: selectedModel ? (motorResistances[selectedModel.id] || []) : []
                 };
 
                 try {
@@ -4208,6 +4318,7 @@ HTML_PAGE = """
                 setDiagramMarks({});
                 setReportImages([]);
                 setCellVoltages({});
+                setMotorResistances({});
                 setLaudosList([]);
             };
 
@@ -4369,7 +4480,9 @@ HTML_PAGE = """
                             showSignatures: headerData.showSignatures !== false,
                             modelName: selectedModel ? selectedModel.name : '',
                             cellAnalysis: selectedModel ? selectedModel.cellAnalysis : null,
-                            cellVoltagesList: selectedModel ? (cellVoltages[selectedModel.id] || []) : []
+                            cellVoltagesList: selectedModel ? (cellVoltages[selectedModel.id] || []) : [],
+                            motorAnalysis: selectedModel ? selectedModel.motorAnalysis : null,
+                            motorResistancesList: selectedModel ? (motorResistances[selectedModel.id] || []) : []
                         };
                         const r2 = await fetch(`/api/os/${osAtual.id}/gerar-pdf-anexar`, {
                             method: 'POST',
@@ -4458,6 +4571,7 @@ HTML_PAGE = """
                 setDiagramMarks({});
                 setReportImages([]);
                 setCellVoltages({});
+                setMotorResistances({});
             };
 
             // ---- Compressão de imagens (max 1200px, JPEG 75%) ----
@@ -4481,7 +4595,7 @@ HTML_PAGE = """
                 const compressed = await Promise.all((reportImages || []).map(async img => ({
                     ...img, src: await compressImage(img.src)
                 })));
-                const state = { headerData, answers, diagramMarks, reportImages: compressed, pdfMargin, cellVoltages };
+                const state = { headerData, answers, diagramMarks, reportImages: compressed, pdfMargin, cellVoltages, motorResistances };
                 const clientField = headerConfig.find(f => f.id === 'client');
                 const clientName = clientField ? (headerData[clientField.id] || '') : '';
                 const finalName = name || (clientName ? `${clientName} — ${headerData.date || ''}` : 'Laudo ' + new Date().toLocaleDateString('pt-BR'));
@@ -4506,6 +4620,7 @@ HTML_PAGE = """
                         setReportImages(s.reportImages || []);
                         setPdfMargin(s.pdfMargin || '1.5cm');
                         setCellVoltages(s.cellVoltages || {});
+                        setMotorResistances(s.motorResistances || {});
                         setLaudosModalOpen(false);
                         setActiveTab('report');
                     }
@@ -4579,7 +4694,9 @@ HTML_PAGE = """
                     showSignatures: headerData.showSignatures !== false,
                     modelName: selectedModel ? selectedModel.name : '',
                     cellAnalysis: selectedModel ? selectedModel.cellAnalysis : null,
-                    cellVoltagesList: selectedModel ? (cellVoltages[selectedModel.id] || []) : []
+                    cellVoltagesList: selectedModel ? (cellVoltages[selectedModel.id] || []) : [],
+                    motorAnalysis: selectedModel ? selectedModel.motorAnalysis : null,
+                    motorResistancesList: selectedModel ? (motorResistances[selectedModel.id] || []) : []
                 };
                 // Se há uma OS aberta com serviços/peças, inclui a página de Orçamento no PDF
                 if (currentOs && ((currentOs.services||[]).length || (currentOs.parts||[]).length)) {
@@ -5131,6 +5248,80 @@ HTML_PAGE = """
                             </div>
                         `}
 
+                        ${selectedModel && selectedModel.motorAnalysis && selectedModel.motorAnalysis.enabled && html`
+                            <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                                <h2 className="text-xl font-semibold mb-1 text-slate-800 flex items-center gap-2">
+                                    <i className="ph-fill ph-fan text-cyan-600 text-2xl"></i> Análise de Resistência dos Motores
+                                </h2>
+                                <p className="text-sm text-slate-500 mb-4">Informe a resistência de cada motor em Ω (ohms). Pressione Enter para avançar.</p>
+                                ${(() => {
+                                    const ma = selectedModel.motorAnalysis;
+                                    const numMotors = Math.min(ma.numMotors || 8, 8);
+                                    const curtoMax = ma.curtoMax || 0.05;
+                                    const baixaMax = ma.baixaCriticaMax || 0.15;
+                                    const modelKey = selectedModel.id;
+                                    const res = motorResistances[modelKey] || [];
+                                    const classify = (raw) => {
+                                        if (raw === '' || raw === undefined || raw === null) return { label: '—', badge: 'bg-slate-100 text-slate-400 border-slate-200' };
+                                        const v = parseFloat(raw);
+                                        if (isNaN(v)) return { label: '—', badge: 'bg-slate-100 text-slate-400 border-slate-200' };
+                                        if (v <= curtoMax) return { label: 'Curto', badge: 'bg-red-100 text-red-800 border-red-300' };
+                                        if (v <= baixaMax) return { label: 'Baixa Crítica', badge: 'bg-orange-100 text-orange-800 border-orange-300' };
+                                        return { label: 'Normal', badge: 'bg-emerald-100 text-emerald-800 border-emerald-300' };
+                                    };
+                                    const counts = { 'Curto': 0, 'Baixa Crítica': 0, 'Normal': 0 };
+                                    for (let i = 0; i < numMotors; i++) { const c = classify(res[i]); if (counts[c.label] !== undefined) counts[c.label]++; }
+                                    return html`
+                                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                                            <div className="md:col-span-2">
+                                                <div className="grid gap-3" style=${{ gridTemplateRows: `repeat(${Math.ceil(numMotors/2)}, auto)`, gridAutoFlow: 'column' }}>
+                                                    ${Array.from({ length: numMotors }, (_, i) => {
+                                                        const c = classify(res[i]);
+                                                        return html`
+                                                        <div key=${i} className="flex items-center gap-2">
+                                                            <span className="text-xs font-bold text-slate-400 w-8 text-right">M${i+1}</span>
+                                                            <input
+                                                                type="number" step="0.001" placeholder="0.000"
+                                                                value=${res[i] || ''}
+                                                                id=${'mr-' + modelKey + '-' + i}
+                                                                onKeyDown=${(e) => {
+                                                                    if (e.key === 'Enter') {
+                                                                        e.preventDefault();
+                                                                        const next = document.getElementById('mr-' + modelKey + '-' + (i+1));
+                                                                        if (next) { next.focus(); next.select(); }
+                                                                    }
+                                                                }}
+                                                                onChange=${(e) => {
+                                                                    const arr = [...(motorResistances[modelKey] || Array(numMotors).fill(''))];
+                                                                    while (arr.length < numMotors) arr.push('');
+                                                                    arr[i] = e.target.value;
+                                                                    setMotorResistances({ ...motorResistances, [modelKey]: arr });
+                                                                }}
+                                                                className="w-full p-1.5 text-sm border border-slate-300 rounded focus:ring-2 focus:ring-cyan-400 outline-none text-center font-mono"
+                                                            />
+                                                            <span className=${'text-[10px] font-bold px-1.5 py-0.5 rounded border whitespace-nowrap ' + c.badge}>${c.label}</span>
+                                                        </div>
+                                                    `})}
+                                                </div>
+                                            </div>
+                                            <div className="flex flex-col gap-3">
+                                                <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 space-y-2 text-sm">
+                                                    <div className="flex justify-between items-center"><span className="text-red-700 font-bold">Curto</span><span className="font-bold font-mono">${counts['Curto']}</span></div>
+                                                    <div className="flex justify-between items-center"><span className="text-orange-700 font-bold">Baixa Crítica</span><span className="font-bold font-mono">${counts['Baixa Crítica']}</span></div>
+                                                    <div className="flex justify-between items-center"><span className="text-emerald-700 font-bold">Normal</span><span className="font-bold font-mono">${counts['Normal']}</span></div>
+                                                </div>
+                                                <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs text-slate-500 leading-relaxed">
+                                                    <div><b>Curto:</b> ≤ ${curtoMax.toFixed(3)} Ω</div>
+                                                    <div><b>Baixa Crítica:</b> ≤ ${baixaMax.toFixed(3)} Ω</div>
+                                                    <div><b>Normal:</b> > ${baixaMax.toFixed(3)} Ω</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    `;
+                                })()}
+                            </div>
+                        `}
+
                         ${selectedModel && selectedModel.diagrams.length > 0 && html`
                             <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                                 <h2 className="text-xl font-semibold mb-2 text-slate-800 flex items-center gap-2">
@@ -5404,6 +5595,44 @@ HTML_PAGE = """
                                                             onChange=${e => updateCurrentModel('cellAnalysis', { ...currentEditingModel.cellAnalysis, maxDropV: parseFloat(e.target.value) || 0.2 })}
                                                             className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-yellow-400 outline-none font-bold" />
                                                         <p className="text-xs text-slate-400 mt-1">Diferença máx-mín tolerada</p>
+                                                    </div>
+                                                </div>
+                                            `}
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <div className="flex justify-between items-center mb-4 border-b border-slate-200 pb-2">
+                                            <h3 className="font-bold text-lg flex items-center gap-2 text-slate-700"><i className="ph-fill ph-fan text-cyan-600"></i> Análise de Resistência dos Motores (Drone)</h3>
+                                        </div>
+                                        <div className="space-y-3 p-4 bg-slate-50 rounded-lg border border-slate-200 mb-6">
+                                            <label className="flex items-center gap-3 cursor-pointer">
+                                                <input type="checkbox" checked=${(currentEditingModel.motorAnalysis && currentEditingModel.motorAnalysis.enabled) || false}
+                                                    onChange=${e => updateCurrentModel('motorAnalysis', { ...(currentEditingModel.motorAnalysis || {}), enabled: e.target.checked, numMotors: (currentEditingModel.motorAnalysis||{}).numMotors || 8, curtoMax: (currentEditingModel.motorAnalysis||{}).curtoMax || 0.05, baixaCriticaMax: (currentEditingModel.motorAnalysis||{}).baixaCriticaMax || 0.15 })}
+                                                    className="w-5 h-5 text-cyan-600 rounded cursor-pointer" />
+                                                <span className="font-semibold text-slate-700">Ativar Análise de Motores neste modelo</span>
+                                            </label>
+                                            ${currentEditingModel.motorAnalysis && currentEditingModel.motorAnalysis.enabled && html`
+                                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-slate-200">
+                                                    <div>
+                                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Nº de Motores</label>
+                                                        <input type="number" min="1" max="8" value=${currentEditingModel.motorAnalysis.numMotors || 8}
+                                                            onChange=${e => updateCurrentModel('motorAnalysis', { ...currentEditingModel.motorAnalysis, numMotors: Math.min(8, parseInt(e.target.value) || 8) })}
+                                                            className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-cyan-400 outline-none font-bold" />
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Corte Curto (Ω)</label>
+                                                        <input type="number" min="0" step="0.001" value=${currentEditingModel.motorAnalysis.curtoMax || 0.05}
+                                                            onChange=${e => updateCurrentModel('motorAnalysis', { ...currentEditingModel.motorAnalysis, curtoMax: parseFloat(e.target.value) || 0 })}
+                                                            className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-cyan-400 outline-none font-bold" />
+                                                        <p className="text-xs text-slate-400 mt-1">≤ este valor = Curto</p>
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Corte Baixa Crítica (Ω)</label>
+                                                        <input type="number" min="0" step="0.001" value=${currentEditingModel.motorAnalysis.baixaCriticaMax || 0.15}
+                                                            onChange=${e => updateCurrentModel('motorAnalysis', { ...currentEditingModel.motorAnalysis, baixaCriticaMax: parseFloat(e.target.value) || 0 })}
+                                                            className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-cyan-400 outline-none font-bold" />
+                                                        <p className="text-xs text-slate-400 mt-1">≤ este = Baixa Crítica; acima = Normal</p>
                                                     </div>
                                                 </div>
                                             `}
