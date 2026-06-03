@@ -2659,8 +2659,8 @@ def _gerar_pdf_laudo(payload):
     if motor_analysis and motor_analysis.get('enabled') and any((str(x).strip() for x in motor_list)):
         try:
             num_motors = min(int(motor_analysis.get('numMotors') or 8), 8)
-            curto_max = float(motor_analysis.get('curtoMax') or 0.05)
-            baixa_max = float(motor_analysis.get('baixaCriticaMax') or 0.15)
+            curto_max = float(motor_analysis.get('curtoMax') or 50)
+            baixa_max = float(motor_analysis.get('baixaCriticaMax') or 300)
 
             def _classifica_motor(v):
                 if v is None:
@@ -2672,7 +2672,7 @@ def _gerar_pdf_laudo(payload):
                 return 'Normal', '#10b981'
 
             counts = {'Curto': 0, 'Baixa Crítica': 0, 'Normal': 0}
-            rows = [['Motor', 'Resistência (Ω)', 'Status']]
+            rows = [['Motor', 'Isolamento (MΩ)', 'Status']]
             row_colors = []
             for i in range(num_motors):
                 raw = motor_list[i] if i < len(motor_list) else ''
@@ -2686,11 +2686,11 @@ def _gerar_pdf_laudo(payload):
                 if v is None:
                     rows.append([f"M{i+1}", '—', '—'])
                 else:
-                    rows.append([f"M{i+1}", f"{v:.3f}", label])
+                    rows.append([f"M{i+1}", f"{v:g}", label])
                 row_colors.append(hexc)
 
             story.append(PageBreak())
-            story.append(secao('Análise de Resistência dos Motores'))
+            story.append(secao('Resistência de Isolamento dos Motores'))
             story.append(Spacer(1, 3*mm))
 
             # Resumo (contagens) + limites configurados, lado a lado
@@ -2714,13 +2714,12 @@ def _gerar_pdf_laudo(payload):
                     rstyle.append(('BACKGROUND', (0,ri), (-1,ri), C_LIGHT))
             resumo_table.setStyle(TableStyle(rstyle))
 
-            tem_problema = counts['Curto'] > 0 or counts['Baixa Crítica'] > 0
             diag_hex = '#991b1b' if counts['Curto'] > 0 else ('#f97316' if counts['Baixa Crítica'] > 0 else '#10b981')
-            diag_label = 'Curto detectado' if counts['Curto'] > 0 else ('Baixa resistência crítica' if counts['Baixa Crítica'] > 0 else 'Motores normais')
+            diag_label = 'Isolamento crítico (curto)' if counts['Curto'] > 0 else ('Isolamento baixo' if counts['Baixa Crítica'] > 0 else 'Isolamento normal')
             status_card = Table([
-                [Paragraph('<font color="#6b7280" size=8>DIAGNÓSTICO DOS MOTORES</font>', small)],
+                [Paragraph('<font color="#6b7280" size=8>DIAGNÓSTICO DE ISOLAMENTO</font>', small)],
                 [Paragraph(f'<b><font color="{diag_hex}" size=15>{diag_label}</font></b>', body)],
-                [Paragraph(f'<font color="#6b7280" size=8>Curto ≤ {curto_max:.3f}Ω · Baixa crítica ≤ {baixa_max:.3f}Ω</font>', small)],
+                [Paragraph(f'<font color="#6b7280" size=8>Crítico ≤ {curto_max:g} MΩ · Baixa ≤ {baixa_max:g} MΩ · Normal > {baixa_max:g} MΩ</font>', small)],
             ], colWidths=[80*mm])
             status_card.setStyle(TableStyle([
                 ('BACKGROUND', (0,0), (-1,-1), C_LIGHT),
@@ -5251,14 +5250,14 @@ HTML_PAGE = """
                         ${selectedModel && selectedModel.motorAnalysis && selectedModel.motorAnalysis.enabled && html`
                             <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                                 <h2 className="text-xl font-semibold mb-1 text-slate-800 flex items-center gap-2">
-                                    <i className="ph-fill ph-fan text-cyan-600 text-2xl"></i> Análise de Resistência dos Motores
+                                    <i className="ph-fill ph-fan text-cyan-600 text-2xl"></i> Resistência de Isolamento dos Motores
                                 </h2>
-                                <p className="text-sm text-slate-500 mb-4">Informe a resistência de cada motor em Ω (ohms). Pressione Enter para avançar.</p>
+                                <p className="text-sm text-slate-500 mb-4">Informe a resistência de isolamento de cada motor em MΩ (megaohms). Pressione Enter para avançar.</p>
                                 ${(() => {
                                     const ma = selectedModel.motorAnalysis;
                                     const numMotors = Math.min(ma.numMotors || 8, 8);
-                                    const curtoMax = ma.curtoMax || 0.05;
-                                    const baixaMax = ma.baixaCriticaMax || 0.15;
+                                    const curtoMax = ma.curtoMax || 50;
+                                    const baixaMax = ma.baixaCriticaMax || 300;
                                     const modelKey = selectedModel.id;
                                     const res = motorResistances[modelKey] || [];
                                     const classify = (raw) => {
@@ -5281,7 +5280,7 @@ HTML_PAGE = """
                                                         <div key=${i} className="flex items-center gap-2">
                                                             <span className="text-xs font-bold text-slate-400 w-8 text-right">M${i+1}</span>
                                                             <input
-                                                                type="number" step="0.001" placeholder="0.000"
+                                                                type="number" step="0.1" placeholder="0.0"
                                                                 value=${res[i] || ''}
                                                                 id=${'mr-' + modelKey + '-' + i}
                                                                 onKeyDown=${(e) => {
@@ -5311,9 +5310,9 @@ HTML_PAGE = """
                                                     <div className="flex justify-between items-center"><span className="text-emerald-700 font-bold">Normal</span><span className="font-bold font-mono">${counts['Normal']}</span></div>
                                                 </div>
                                                 <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs text-slate-500 leading-relaxed">
-                                                    <div><b>Curto:</b> ≤ ${curtoMax.toFixed(3)} Ω</div>
-                                                    <div><b>Baixa Crítica:</b> ≤ ${baixaMax.toFixed(3)} Ω</div>
-                                                    <div><b>Normal:</b> > ${baixaMax.toFixed(3)} Ω</div>
+                                                    <div><b>Curto/Crítico:</b> ≤ ${curtoMax} MΩ</div>
+                                                    <div><b>Baixa Crítica:</b> ≤ ${baixaMax} MΩ</div>
+                                                    <div><b>Normal:</b> > ${baixaMax} MΩ</div>
                                                 </div>
                                             </div>
                                         </div>
@@ -5603,15 +5602,16 @@ HTML_PAGE = """
 
                                     <div>
                                         <div className="flex justify-between items-center mb-4 border-b border-slate-200 pb-2">
-                                            <h3 className="font-bold text-lg flex items-center gap-2 text-slate-700"><i className="ph-fill ph-fan text-cyan-600"></i> Análise de Resistência dos Motores (Drone)</h3>
+                                            <h3 className="font-bold text-lg flex items-center gap-2 text-slate-700"><i className="ph-fill ph-fan text-cyan-600"></i> Resistência de Isolamento dos Motores (MΩ)</h3>
                                         </div>
                                         <div className="space-y-3 p-4 bg-slate-50 rounded-lg border border-slate-200 mb-6">
                                             <label className="flex items-center gap-3 cursor-pointer">
                                                 <input type="checkbox" checked=${(currentEditingModel.motorAnalysis && currentEditingModel.motorAnalysis.enabled) || false}
-                                                    onChange=${e => updateCurrentModel('motorAnalysis', { ...(currentEditingModel.motorAnalysis || {}), enabled: e.target.checked, numMotors: (currentEditingModel.motorAnalysis||{}).numMotors || 8, curtoMax: (currentEditingModel.motorAnalysis||{}).curtoMax || 0.05, baixaCriticaMax: (currentEditingModel.motorAnalysis||{}).baixaCriticaMax || 0.15 })}
+                                                    onChange=${e => updateCurrentModel('motorAnalysis', { ...(currentEditingModel.motorAnalysis || {}), enabled: e.target.checked, numMotors: (currentEditingModel.motorAnalysis||{}).numMotors || 8, curtoMax: (currentEditingModel.motorAnalysis||{}).curtoMax || 50, baixaCriticaMax: (currentEditingModel.motorAnalysis||{}).baixaCriticaMax || 300 })}
                                                     className="w-5 h-5 text-cyan-600 rounded cursor-pointer" />
                                                 <span className="font-semibold text-slate-700">Ativar Análise de Motores neste modelo</span>
                                             </label>
+                                            <p className="text-xs text-slate-400">Teste de isolamento (megger): resistência ALTA = bom, BAIXA = isolamento comprometido. Ref.: crítico ≤ 50 MΩ · baixa 50–300 MΩ · normal > 300 MΩ (motor novo ~5500 MΩ / 5,5 GΩ).</p>
                                             ${currentEditingModel.motorAnalysis && currentEditingModel.motorAnalysis.enabled && html`
                                                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-slate-200">
                                                     <div>
@@ -5621,15 +5621,15 @@ HTML_PAGE = """
                                                             className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-cyan-400 outline-none font-bold" />
                                                     </div>
                                                     <div>
-                                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Corte Curto (Ω)</label>
-                                                        <input type="number" min="0" step="0.001" value=${currentEditingModel.motorAnalysis.curtoMax || 0.05}
+                                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Corte Curto/Crítico (MΩ)</label>
+                                                        <input type="number" min="0" step="1" value=${currentEditingModel.motorAnalysis.curtoMax || 50}
                                                             onChange=${e => updateCurrentModel('motorAnalysis', { ...currentEditingModel.motorAnalysis, curtoMax: parseFloat(e.target.value) || 0 })}
                                                             className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-cyan-400 outline-none font-bold" />
-                                                        <p className="text-xs text-slate-400 mt-1">≤ este valor = Curto</p>
+                                                        <p className="text-xs text-slate-400 mt-1">≤ este valor = Curto/Crítico</p>
                                                     </div>
                                                     <div>
-                                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Corte Baixa Crítica (Ω)</label>
-                                                        <input type="number" min="0" step="0.001" value=${currentEditingModel.motorAnalysis.baixaCriticaMax || 0.15}
+                                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Corte Baixa Crítica (MΩ)</label>
+                                                        <input type="number" min="0" step="1" value=${currentEditingModel.motorAnalysis.baixaCriticaMax || 300}
                                                             onChange=${e => updateCurrentModel('motorAnalysis', { ...currentEditingModel.motorAnalysis, baixaCriticaMax: parseFloat(e.target.value) || 0 })}
                                                             className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-cyan-400 outline-none font-bold" />
                                                         <p className="text-xs text-slate-400 mt-1">≤ este = Baixa Crítica; acima = Normal</p>
