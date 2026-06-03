@@ -2217,6 +2217,8 @@ def gerar_texto_ia():
     answers = body.get('answers', {})
     questions = body.get('questions', [])
     cell_summary = body.get('cellSummary')  # texto pronto do resumo de células (opcional)
+    motor_summary = body.get('motorSummary')  # resumo de isolamento dos motores (opcional)
+    equipment_type = (body.get('equipmentType') or '').strip().lower()
     model_name = body.get('modelName', '')
 
     # Monta a lista de achados
@@ -2245,7 +2247,6 @@ def gerar_texto_ia():
 
     achados_txt = "\n".join(achados) if achados else "Nenhum defeito assinalado no checklist."
     info_txt = "\n".join(info_lines) if info_lines else "Não informado."
-    cell_txt = f"\n\nAnálise de células:\n{cell_summary}" if cell_summary else ""
 
     from datetime import datetime as _dt
     data_hoje = _dt.now().strftime('%d de %B de %Y')
@@ -2253,63 +2254,122 @@ def gerar_texto_ia():
     for en, pt in meses.items():
         data_hoje = data_hoje.replace(en, pt)
 
-    prompt = f"""Você é um técnico especialista do Laboratório BioDron - Soluções Tecnológicas, especializado em manutenção de baterias inteligentes de drones agrícolas DJI Agras.
+    # ---- Detecta o tipo de equipamento (explícito do modelo, senão por palavra-chave) ----
+    txt_busca = (equipment_type + ' ' + (model_name or '')).lower()
+    if 'bateria' in txt_busca or equipment_type == 'bateria':
+        tipo = 'bateria'
+    elif 'carregad' in txt_busca or equipment_type == 'carregador':
+        tipo = 'carregador'
+    elif 'drone' in txt_busca or 'aeronave' in txt_busca or equipment_type == 'drone':
+        tipo = 'drone'
+    else:
+        tipo = 'generico'
 
-Elabore um LAUDO TÉCNICO DE DIAGNÓSTICO E ANÁLISE completo e profissional, em português do Brasil, com tom técnico e comercial, seguindo EXATAMENTE a estrutura do modelo abaixo. Para CADA defeito ou condição encontrada, explique a CONSEQUÊNCIA técnica e o RISCO de não corrigir (ex: adesivo danificado expõe a placa BMS a contaminação e infiltração; borrachas faltando comprometem a vedação IP e o amortecimento). Sempre que houver voltage drop / equalização, dê um parecer técnico relacionando o desnível com a contagem de ciclos e recomende equalização em bancada quando pertinente.
+    # Anexa o resumo da análise específica conforme o tipo
+    analise_txt = ''
+    if tipo == 'bateria' and cell_summary:
+        analise_txt = f"\n\nAnálise de células (tensão):\n{cell_summary}"
+    elif tipo == 'drone' and motor_summary:
+        analise_txt = f"\n\nAnálise de resistência de isolamento dos motores:\n{motor_summary}"
 
-NÃO invente defeitos que não foram informados. Use apenas os dados fornecidos. Se drone e carregador foram testados e estão OK, mencione na seção 1.
+    # Perfis por tipo de equipamento
+    PERFIS = {
+        'bateria': {
+            'papel': 'manutenção de baterias inteligentes de voo de drones agrícolas DJI Agras',
+            'titulo': 'BATERIA DJI AGRAS',
+            'equip': f'Bateria Inteligente de Voo DJI Agras {model_name}',
+            'sec1': 'Resultado dos testes com o drone e o carregador associados, se informados.',
+            'sec2_tit': 'Diagnóstico Eletrônico e Químico',
+            'sec2': 'Contagem de ciclos, voltage drop/equalização e parecer técnico sobre a química/sincronia das células. OBRIGATÓRIO: parágrafo sobre a saúde química das células (desgaste eletroquímico das placas de lítio, capacidade residual estimada, envelhecimento e sincronia entre células) e implicações para performance e segurança em voo.',
+            'sec5': 'testes de bancada/estresse e ciclo de carga/descarga após os serviços; ressalva de possível nova análise se houver fadiga das células',
+            'sec6a': '(a) Selo de Umidade: informe se foi ativado. Se ativado: (1) a garantia DJI é anulada (exposição a umidade/condensação, fora da cobertura); (2) a umidade pode ter comprometido as células de forma não visível, portanto o Laboratório BioDron NÃO PODE GARANTIR a saúde das células nem o desempenho pleno após a manutenção; (3) risco de degradação/falha mesmo após os serviços, com ciência do cliente ao aprovar.',
+        },
+        'carregador': {
+            'papel': 'manutenção de carregadores e fontes de drones agrícolas DJI Agras',
+            'titulo': 'CARREGADOR DJI AGRAS',
+            'equip': f'Carregador/Fonte DJI Agras {model_name}',
+            'sec1': 'Resultado dos testes com a bateria e a rede elétrica (entrada AC) associadas, se informados.',
+            'sec2_tit': 'Diagnóstico Eletrônico',
+            'sec2': 'Tensão e corrente de saída (medidas x nominal), funcionamento da retificação/conversão, estado dos conectores de entrada (AC) e saída, ventoinha/refrigeração e sinais de superaquecimento. Parecer técnico sobre a estabilidade da saída e o risco de dano às baterias conectadas.',
+            'sec5': 'testes de carga com carga real/simulada, medição da saída sob carga e verificação térmica após os serviços',
+            'sec6a': '(a) Selo de Umidade/Infiltração: se houver sinais de entrada de água/umidade, a garantia DJI fica comprometida e há risco à eletrônica de potência; o Laboratório BioDron não pode garantir a estabilidade da saída após a manutenção.',
+        },
+        'drone': {
+            'papel': 'manutenção de drones agrícolas de pulverização DJI Agras',
+            'titulo': 'DRONE DJI AGRAS',
+            'equip': f'Drone Agrícola de Pulverização DJI Agras {model_name}',
+            'sec1': 'Resultado dos testes com as baterias e o controle remoto associados, se informados.',
+            'sec2_tit': 'Diagnóstico Eletrônico e de Motorização',
+            'sec2': 'Estado dos motores (resistência de ISOLAMENTO medida em MΩ — alta = boa; baixa = isolamento comprometido por umidade/defensivos), ESCs, braços/dobradiças, hélices, sensores (radar/visão/FPV), módulo de pulverização (bomba/bicos) e estrutura. Parecer técnico relacionando a isolação dos motores ao risco de falha em voo/queda. OBRIGATÓRIO: parágrafo sobre a resistência de isolamento dos motores e o que os valores indicam.',
+            'sec5': 'testes de bancada, verificação de motores/ESCs, calibração de sensores/bússola e voo de teste controlado após os serviços',
+            'sec6a': '(a) Selo de Umidade/Vedação: a exposição a umidade e defensivos agrícolas degrada a isolação dos motores e a eletrônica; se houver sinais de infiltração, a garantia DJI pode ser anulada e o Laboratório BioDron não garante a vida útil dos motores após a manutenção.',
+        },
+        'generico': {
+            'papel': 'manutenção de equipamentos de drones agrícolas DJI Agras',
+            'titulo': 'EQUIPAMENTO DJI AGRAS',
+            'equip': f'Equipamento DJI Agras {model_name}',
+            'sec1': 'Resultado dos testes com os equipamentos associados, se informados.',
+            'sec2_tit': 'Diagnóstico Eletrônico',
+            'sec2': 'Análise eletrônica e funcional do equipamento conforme os achados, com parecer técnico sobre cada condição encontrada.',
+            'sec5': 'testes funcionais e de bancada após os serviços',
+            'sec6a': '(a) Selo de Umidade/Infiltração: se houver sinais de umidade/contaminação, a garantia de fábrica pode ser comprometida.',
+        },
+    }
+    p = PERFIS[tipo]
 
-ITENS OBRIGATÓRIOS em TODAS as análises, independentemente dos defeitos encontrados:
-- Seção 2 DEVE sempre conter um parágrafo sobre a saúde química das células: desgaste eletroquímico, capacidade residual, sincronia entre células e nível de envelhecimento, mesmo que as tensões estejam dentro do limite.
-- Seção 6 DEVE sempre conter: (a) status do selo de umidade e consequência para a garantia de fábrica; (b) aviso sobre risco de infiltração; (c) aviso de que podem ocorrer falhas secundárias após a manutenção.
+    prompt = f"""Você é um técnico especialista do Laboratório BioDron - Soluções Tecnológicas, especializado em {p['papel']}.
+
+Elabore um LAUDO TÉCNICO DE DIAGNÓSTICO E ANÁLISE completo e profissional, em português do Brasil, com tom técnico e comercial, seguindo EXATAMENTE a estrutura abaixo. O laudo é referente a um equipamento do tipo {tipo.upper()} — escreva TODO o texto sobre esse tipo de equipamento, NÃO fale de outro tipo. Para CADA defeito ou condição encontrada, explique a CONSEQUÊNCIA técnica e o RISCO de não corrigir.
+
+NÃO invente defeitos que não foram informados. Use apenas os dados fornecidos.
 
 =========================
 ESTRUTURA OBRIGATÓRIA (siga este formato):
 =========================
 
-LAUDO TÉCNICO DE DIAGNÓSTICO E ANÁLISE - BATERIA DJI AGRAS
-Equipamento: Bateria Inteligente de Voo DJI Agras {model_name}
+LAUDO TÉCNICO DE DIAGNÓSTICO E ANÁLISE - {p['titulo']}
+Equipamento: {p['equip']}
 Data da Análise: {data_hoje}
 Status: Aguardando Aprovação de Orçamento
 
 1. Verificação de Equipamentos Associados (Testes Iniciais):
-[Resultado do teste com Drone e Carregador, se informados]
+[{p['sec1']}]
 
-2. Diagnóstico Eletrônico e Químico:
-[Contagem de ciclos, voltage drop/equalização, e Parecer Técnico explicando a química/sincronia das células. OBRIGATÓRIO: incluir sempre um parágrafo sobre a saúde química das células — desgaste eletroquímico das placas de lítio, capacidade residual estimada, grau de envelhecimento e sincronia eletroquímica entre células, explicando as implicações para a performance e segurança em voo.]
+2. {p['sec2_tit']}:
+[{p['sec2']}]
 
 3. Diagnóstico Físico e Estrutural:
-[Painel de controle/adesivos, vedação/borrachas, danos físicos — cada um com sua consequência]
+[Adesivos/etiquetas, vedação/borrachas, conectores e danos físicos — cada um com sua consequência]
 
 4. Proposta de Serviço (Plano de Intervenção Corretiva e Preventiva):
 [Lista das intervenções recomendadas para corrigir cada item encontrado]
 
 5. Protocolo de Testes:
-[Texto sobre testes de bancada/estresse e voo após os serviços, e ressalva de possível nova análise se houver fadiga das células]
+[Texto sobre {p['sec5']}]
 
-6. Garantia e Avisos Importantes:
-[SEMPRE incluir os três itens abaixo, mesmo que a bateria não apresente defeitos graves:]
-[a) Selo de Umidade: informar se o selo foi ativado (cor alterada). Se ativado, deixar claro que: (1) a garantia de fábrica DJI é automaticamente anulada, pois indica exposição a umidade ou condensação — condição excluída da cobertura do fabricante; (2) a umidade pode ter comprometido internamente as células lítio-polímero de forma não visível na inspeção, portanto o Laboratório BioDron NÃO PODE GARANTIR a saúde das células nem o desempenho pleno após a manutenção; (3) existe risco de degradação acelerada, perda de capacidade ou falha das células mesmo após os serviços realizados, e o cliente está ciente desse risco ao aprovar o orçamento.]
-[b) Risco de Infiltração: alertar que qualquer comprometimento da vedação (borrachas, encaixes, adesivos) expõe o BMS e as células lítio-polímero a umidade e agentes químicos do campo (herbicidas, inseticidas), podendo causar corrosão interna, curto-circuito e risco de incêndio.]
-[c) Falhas Secundárias: esclarecer que em baterias com desgaste avançado ou que sofreram impacto/infiltração, após a intervenção técnica podem se manifestar falhas secundárias em componentes internos que já estavam comprometidos antes da manutenção — situação inerente ao estado prévio do equipamento e sem responsabilidade do Laboratório BioDron.]
+6. Garantia e Avisos Importantes (SEMPRE incluir os três):
+[{p['sec6a']}]
+[(b) Risco de Infiltração: qualquer comprometimento da vedação expõe a eletrônica a umidade e agentes químicos do campo (herbicidas/inseticidas), podendo causar corrosão, curto-circuito e risco de incêndio.]
+[(c) Falhas Secundárias: em equipamentos com desgaste avançado ou que sofreram impacto/infiltração, após a intervenção podem surgir falhas secundárias em componentes que já estavam comprometidos antes da manutenção — situação inerente ao estado prévio do equipamento e sem responsabilidade do Laboratório BioDron.]
 
 Lembramos sempre que o orçamento detalhado encontra-se em anexo no e-mail ou enviado pelo WhatsApp.
 
 Assinado: Laboratório BioDron - Soluções Tecnológicas
 
 =========================
-DADOS REAIS DESTA BATERIA (use estes):
+DADOS REAIS DESTE EQUIPAMENTO (use estes):
 =========================
+TIPO: {tipo}
 MODELO: {model_name}
 
 DADOS GERAIS:
 {info_txt}
 
 ACHADOS DA INSPEÇÃO (checklist):
-{achados_txt}{cell_txt}
+{achados_txt}{analise_txt}
 
 =========================
-Escreva o laudo completo seguindo a estrutura acima, em texto puro (sem markdown, sem asteriscos, sem ##), pronto para copiar e colar no Omie/proposta. Mantенha os títulos das seções numeradas."""
+Escreva o laudo completo seguindo a estrutura acima, em texto puro (sem markdown, sem asteriscos, sem ##), pronto para copiar e colar no Omie/proposta. Mantenha os títulos das seções numeradas."""
 
     def _build_body(modelo):
         gen_config = {"temperature": 0.5, "maxOutputTokens": 4096}
@@ -4758,6 +4818,19 @@ HTML_PAGE = """
                     }
                 }
 
+                // Monta resumo de isolamento dos motores se houver (para laudo de drone)
+                let motorSummary = null;
+                if (selectedModel && selectedModel.motorAnalysis && selectedModel.motorAnalysis.enabled) {
+                    const ma = selectedModel.motorAnalysis;
+                    const curtoMax = ma.curtoMax || 50, baixaMax = ma.baixaCriticaMax || 300;
+                    const res = (motorResistances[selectedModel.id] || []).map(v => parseFloat(v)).filter(v => !isNaN(v) && v >= 0);
+                    if (res.length) {
+                        let curto = 0, baixa = 0, normal = 0;
+                        res.forEach(v => { if (v <= curtoMax) curto++; else if (v <= baixaMax) baixa++; else normal++; });
+                        motorSummary = `${res.length} motor(es) medido(s) por resistência de isolamento (MΩ): ${normal} normal(is) (>${baixaMax}MΩ), ${baixa} em baixa crítica (${curtoMax}-${baixaMax}MΩ), ${curto} crítico(s)/curto (≤${curtoMax}MΩ). ${(curto > 0) ? 'Há motor com isolamento crítico — risco de fuga/curto.' : (baixa > 0 ? 'Há motor com isolamento degradado.' : 'Isolamento dos motores dentro do esperado.')}`;
+                    }
+                }
+
                 try {
                     const resp = await fetch('/api/gerar-texto-ia', {
                         method: 'POST',
@@ -4766,7 +4839,9 @@ HTML_PAGE = """
                             headerData, headerConfig, answers,
                             questions: selectedModel ? selectedModel.questions : [],
                             modelName: selectedModel ? selectedModel.name : '',
-                            cellSummary
+                            equipmentType: selectedModel ? (selectedModel.equipmentType || '') : '',
+                            cellSummary,
+                            motorSummary
                         })
                     });
                     const data = await resp.json();
@@ -5541,6 +5616,14 @@ HTML_PAGE = """
                                     <div className="flex-1 w-full">
                                         <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Nome do Modelo Sendo Editado</label>
                                         <input type="text" value=${currentEditingModel.name} onChange=${e => updateCurrentModel('name', e.target.value)} className="w-full text-lg font-bold p-2 border border-slate-300 rounded focus:ring-2 focus:ring-indigo-500 outline-none" />
+                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1 mt-2">Tipo de Equipamento (a IA escreve o laudo sobre isto)</label>
+                                        <select value=${currentEditingModel.equipmentType || ''} onChange=${e => updateCurrentModel('equipmentType', e.target.value)} className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-indigo-500 outline-none bg-white">
+                                            <option value="">Detectar pelo nome do modelo</option>
+                                            <option value="bateria">Bateria</option>
+                                            <option value="carregador">Carregador</option>
+                                            <option value="drone">Drone</option>
+                                            <option value="generico">Outro / Genérico</option>
+                                        </select>
                                     </div>
                                     <div className="flex gap-2">
                                         <button onClick=${() => duplicateModel(currentEditingModel.id)} className="bg-slate-200 hover:bg-slate-300 text-slate-700 px-3 py-2 rounded font-medium flex items-center gap-1 text-sm"><i className="ph-bold ph-copy"></i> Duplicar</button>
