@@ -3117,14 +3117,40 @@ def os_crm_finalizar(os_id):
     nova_fase = CRM_FASE_DESTINO_FINALIZACAO.get(fase_atual)
     fase_movida = False
     fase_warning = None
+
+    # Monta a referência cruzada (OS + PV) pra registrar nas observações da oportunidade.
+    os_num = draft.get('omieOsNumber') or '—'
+    pv_num = draft.get('pedidoVendaNumero') or '—'
+    hoje = datetime.now().strftime('%d/%m/%Y')
+    ref_linha = f"[Smart Report] OS nº {os_num} / Pedido de Venda nº {pv_num} — gerados em {hoje}."
+
+    # Lê o cObs atual pra ANEXAR (sem apagar o diagnóstico do vendedor).
+    obs_atual = ''
+    try:
+        cons = omie_call('/crm/oportunidades/', 'ConsultarOportunidade', {"nCodOp": int(draft['crmOpId'])})
+        obs_atual = (cons.get('observacoes', {}) or {}).get('cObs', '') or ''
+    except OmieError:
+        pass
+    if f"OS nº {os_num}" in obs_atual:
+        novo_obs = obs_atual  # já registrado antes; não duplica
+    else:
+        novo_obs = (obs_atual + ("\n\n" if obs_atual else "") + ref_linha).strip()
+
+    # Uma única chamada: grava a referência e (se houver) move a fase.
+    param_alt = {
+        "identificacao": {"nCodOp": int(draft['crmOpId'])},
+        "observacoes": {"cObs": novo_obs}
+    }
     if nova_fase:
-        try:
-            _mover_fase_oportunidade(draft['crmOpId'], nova_fase)
+        param_alt["fasesStatus"] = {"nCodFase": nova_fase}
+    try:
+        omie_call('/crm/oportunidades/', 'AlterarOportunidade', param_alt)
+        if nova_fase:
             draft['crmFaseCodigo'] = nova_fase
             fase_movida = True
-        except OmieError as e:
-            fase_warning = f"Não consegui mover a fase da oportunidade: {e}"
-    else:
+    except OmieError as e:
+        fase_warning = f"Não consegui atualizar a oportunidade (fase/observações): {e}"
+    if not nova_fase and not fase_warning:
         fase_warning = f"Fase atual ({CRM_FASES.get(fase_atual, fase_atual)}) não tem transição automática definida."
 
     draft['crmFinalizadoAt'] = datetime.utcnow().isoformat() + "Z"
@@ -3250,6 +3276,10 @@ def os_send(os_id):
 
     # Observações puras (sem mais "Peças utilizadas:" embutido — agora vão pro produtosUtilizados)
     obs_combinada = (draft.get('observations') or '').strip()
+    # Referência cruzada: se a OS veio de uma oportunidade do CRM, registra o nº dela.
+    if draft.get('crmOpNum') and 'Oportunidade CRM' not in obs_combinada:
+        ref_op = f"Ref. Oportunidade CRM nº {draft['crmOpNum']}"
+        obs_combinada = (ref_op + ("\n\n" + obs_combinada if obs_combinada else "")).strip()
 
     itens = []
     for idx, s in enumerate(draft.get('services', [])):
