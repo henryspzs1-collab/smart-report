@@ -1199,6 +1199,31 @@ def omie_debug_listaros():
         return jsonify({"error": str(e)}), e.status
 
 
+@app.route('/api/omie/debug/call', methods=['GET'])
+def omie_debug_call():
+    """TEMPORÁRIO (admin): chama qualquer endpoint/método do Omie pra investigação.
+    ?endpoint=/crm/oportunidades/&call=Metodo&param={...json...}. REMOVER após uso."""
+    user, full_data, err = _require_admin()
+    if err:
+        return err
+    endpoint = request.args.get('endpoint')
+    call = request.args.get('call')
+    param_json = request.args.get('param', '{}')
+    if not endpoint or not call:
+        return jsonify({"error": "Informe ?endpoint=&call=&param={}"}), 400
+    try:
+        param = json.loads(param_json)
+    except Exception:
+        return jsonify({"error": "param não é JSON válido", "recebido": param_json}), 400
+    try:
+        data = omie_call(endpoint, call, param)
+        return jsonify(data)
+    except OmieNoRecords:
+        return jsonify({"empty": True, "msg": "Sem registros."})
+    except OmieError as e:
+        return jsonify({"error": str(e), "endpoint": endpoint, "call": call, "param": param}), e.status
+
+
 # ===== CRM / Oportunidades — listar e puxar pro laudo =====
 # Fases do funil da conta BioDron (nCodFase → nome). Específico desta conta Omie.
 CRM_FASES = {
