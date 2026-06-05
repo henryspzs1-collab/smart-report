@@ -2219,6 +2219,8 @@ def gerar_texto_ia():
     cell_summary = body.get('cellSummary')  # texto pronto do resumo de células (opcional)
     motor_summary = body.get('motorSummary')  # resumo de isolamento dos motores (opcional)
     equipment_type = (body.get('equipmentType') or '').strip().lower()
+    garantia_status = (body.get('garantiaStatus') or 'avulsa').strip().lower()
+    garantia_motivo = (body.get('garantiaMotivo') or '').strip()
     model_name = body.get('modelName', '')
 
     # Monta a lista de achados
@@ -2317,11 +2319,32 @@ def gerar_texto_ia():
     }
     p = PERFIS[tipo]
 
+    # Desfecho de garantia (Fase A): ajusta status, parecer e instruções do laudo
+    GAR = {
+        'avulsa': {
+            'status': 'Aguardando Aprovação de Orçamento',
+            'secao': '',
+            'instr': '',
+        },
+        'garantia_aprovada': {
+            'status': 'Garantia APROVADA — reparo coberto, sem custo ao cliente',
+            'secao': '\n\nPARECER DE GARANTIA: APROVADA\n[Ateste que o defeito constatado ESTÁ COBERTO pela garantia e explique o enquadramento. Informe que o reparo será realizado SEM CUSTO ao cliente. NÃO inclua valores, preços nem orçamento neste laudo.]\n',
+            'instr': 'IMPORTANTE: Esta é uma análise de GARANTIA APROVADA. NÃO inclua orçamento, valores ou cobrança em nenhuma parte. Comece o laudo (logo após o cabeçalho) com a seção "PARECER DE GARANTIA: APROVADA". Na seção 4, liste as intervenções que serão executadas SOB GARANTIA (sem custo ao cliente).',
+        },
+        'garantia_negada': {
+            'status': 'Garantia NEGADA — orçamento para avaliação do cliente',
+            'secao': f'\n\nPARECER DE GARANTIA: NEGADA\n[Explique tecnicamente por que a garantia foi NEGADA, fundamentando no motivo informado: "{garantia_motivo or "condição não coberta pela garantia"}". Deixe claro que a recusa decorre de condição EXCLUÍDA da cobertura de fábrica (ex.: selo de umidade ativado/exposição a umidade, dano por impacto ou mau uso, fora do prazo ou do nº de ciclos, reparo anterior por terceiros). Informe que segue um ORÇAMENTO de serviços e peças em documento SEPARADO, para o cliente avaliar se deseja autorizar a manutenção (que será cobrada).]\n',
+            'instr': f'IMPORTANTE: Esta é uma análise de GARANTIA NEGADA, pelo motivo: "{garantia_motivo or "condição não coberta"}". Comece o laudo (logo após o cabeçalho) com a seção "PARECER DE GARANTIA: NEGADA", justificando tecnicamente a recusa com base nesse motivo. Na seção 4, recomende as intervenções e informe que o orçamento detalhado segue em documento SEPARADO para o cliente decidir se autoriza a manutenção paga.',
+        },
+    }
+    g = GAR.get(garantia_status, GAR['avulsa'])
+
     prompt = f"""Você é um técnico especialista do Laboratório BioDron - Soluções Tecnológicas, especializado em {p['papel']}.
 
 Elabore um LAUDO TÉCNICO DE DIAGNÓSTICO E ANÁLISE completo e profissional, em português do Brasil, com tom técnico e comercial, seguindo EXATAMENTE a estrutura abaixo. O laudo é referente a um equipamento do tipo {tipo.upper()} — escreva TODO o texto sobre esse tipo de equipamento, NÃO fale de outro tipo. Para CADA defeito ou condição encontrada, explique a CONSEQUÊNCIA técnica e o RISCO de não corrigir.
 
 NÃO invente defeitos que não foram informados. Use apenas os dados fornecidos.
+{g['instr']}
 
 =========================
 ESTRUTURA OBRIGATÓRIA (siga este formato):
@@ -2330,7 +2353,7 @@ ESTRUTURA OBRIGATÓRIA (siga este formato):
 LAUDO TÉCNICO DE DIAGNÓSTICO E ANÁLISE - {p['titulo']}
 Equipamento: {p['equip']}
 Data da Análise: {data_hoje}
-Status: Aguardando Aprovação de Orçamento
+Status: {g['status']}{g['secao']}
 
 1. Verificação de Equipamentos Associados (Testes Iniciais):
 [{p['sec1']}]
@@ -3934,6 +3957,9 @@ HTML_PAGE = """
                     patch.crmOpNum = d.cNumOp;
                     patch.crmFaseCodigo = d.faseCodigo;
                     patch.crmClienteOmieId = d.cliente ? d.cliente.omieClientId : null;
+                    // Sugere garantia se a descrição/defeito mencionar
+                    const txtGar = ((d.descricao || '') + ' ' + (d.laudo.defect || '')).toLowerCase();
+                    patch.garantiaSugerida = /garantia|garantido/.test(txtGar);
                     setHeaderData(prev => ({ ...prev, ...patch }));
                     setActiveTab('report');
                     const semCad = d.cliente ? '' : '\\n\\n(Atenção: cliente ainda não tem cadastro de faturamento — selecione/cadastre ao gerar a OS.)';
@@ -4840,6 +4866,8 @@ HTML_PAGE = """
                             questions: selectedModel ? selectedModel.questions : [],
                             modelName: selectedModel ? selectedModel.name : '',
                             equipmentType: selectedModel ? (selectedModel.equipmentType || '') : '',
+                            garantiaStatus: headerData.garantiaStatus || 'avulsa',
+                            garantiaMotivo: headerData.garantiaMotivo || '',
                             cellSummary,
                             motorSummary
                         })
@@ -5196,6 +5224,48 @@ HTML_PAGE = """
                                 `)}
                             </div>
                         </div>
+
+                        ${(() => {
+                            const gStatus = headerData.garantiaStatus || 'avulsa';
+                            const opt = (val, label, cls) => html`
+                                <button type="button" onClick=${() => setHeaderData({ ...headerData, garantiaStatus: val })}
+                                    className=${`flex-1 px-4 py-3 rounded-lg border-2 font-semibold text-sm transition ${gStatus === val ? cls : 'bg-white border-slate-200 text-slate-500 hover:border-slate-300'}`}>
+                                    ${label}
+                                </button>`;
+                            const motivos = ['Selo de umidade ativado', 'Infiltração / corrosão', 'Dano por impacto / mau uso', 'Fora do prazo de garantia', 'Fora do nº de ciclos', 'Reparo anterior por terceiros'];
+                            const addMotivo = (m) => {
+                                const atual = headerData.garantiaMotivo || '';
+                                if (atual.includes(m)) return;
+                                setHeaderData({ ...headerData, garantiaMotivo: (atual ? atual + '; ' : '') + m });
+                            };
+                            return html`
+                            <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                                <h2 className="text-xl font-semibold mb-1 text-slate-800 flex items-center gap-2">
+                                    <i className="ph-fill ph-seal-check text-emerald-600 text-2xl"></i> Atendimento / Garantia
+                                </h2>
+                                <p className="text-sm text-slate-500 mb-4">Defina o desfecho após a análise técnica. Isso ajusta o texto do laudo (e, nas próximas etapas, o orçamento).</p>
+                                ${headerData.garantiaSugerida && gStatus === 'avulsa' && html`
+                                    <div className="bg-amber-50 border border-amber-200 text-amber-800 text-sm p-3 rounded-lg mb-3 flex items-center gap-2">
+                                        <i className="ph-fill ph-warning"></i> Esta oportunidade menciona <b>garantia</b> — defina se foi aprovada ou negada.
+                                    </div>
+                                `}
+                                <div className="flex flex-col sm:flex-row gap-2">
+                                    ${opt('avulsa', 'Manutenção avulsa', 'bg-slate-100 border-slate-400 text-slate-700')}
+                                    ${opt('garantia_aprovada', '🟢 Garantia Aprovada', 'bg-emerald-50 border-emerald-500 text-emerald-700')}
+                                    ${opt('garantia_negada', '🔴 Garantia Negada', 'bg-red-50 border-red-500 text-red-700')}
+                                </div>
+                                ${gStatus === 'garantia_negada' && html`
+                                    <div className="mt-4 pt-4 border-t border-slate-200">
+                                        <label className="block text-sm font-semibold text-slate-700 mb-1">Motivo da negativa da garantia</label>
+                                        <div className="flex flex-wrap gap-2 mb-2">
+                                            ${motivos.map(m => html`<button key=${m} type="button" onClick=${() => addMotivo(m)} className="text-xs bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 px-2 py-1 rounded-full">+ ${m}</button>`)}
+                                        </div>
+                                        <textarea value=${headerData.garantiaMotivo || ''} onChange=${e => setHeaderData({ ...headerData, garantiaMotivo: e.target.value })} rows="2" placeholder="Ex.: Selo de umidade ativado — exposição a umidade não coberta pela garantia." className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-red-400 outline-none"></textarea>
+                                    </div>
+                                `}
+                            </div>
+                            `;
+                        })()}
 
                         ${selectedModel && selectedModel.questions.length > 0 && html`
                             <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
