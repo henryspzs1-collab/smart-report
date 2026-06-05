@@ -2168,6 +2168,68 @@ def os_update(os_id):
     return jsonify(d)
 
 
+@app.route('/api/os/<os_id>/registrar-pecas', methods=['POST'])
+def os_registrar_pecas(os_id):
+    """Registra a substituição de peças (nº de série velha/nova + fotos) na OS.
+    Funciona MESMO com a OS já enviada (sent) — a troca é registrada na execução,
+    depois do envio. Atualiza só os campos de substituição, preserva o resto."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    owner, draft = _find_filial_draft(full_data, user, os_id)
+    if not draft:
+        return jsonify({"error": "OS não encontrada"}), 404
+    body = request.json or {}
+    novas = body.get('parts') or []
+    parts = draft.get('parts') or []
+    campos = ('substituida', 'serialAntigo', 'fotoSerialAntigo', 'serialNovo', 'fotoSerialNovo')
+    for i, np in enumerate(novas):
+        if i < len(parts):
+            for c in campos:
+                if c in np:
+                    parts[i][c] = np[c]
+    draft['parts'] = parts
+    draft['updatedAt'] = datetime.utcnow().isoformat() + "Z"
+    save_data(full_data)
+    return jsonify({"success": True})
+
+
+@app.route('/api/pecas/buscar-serial', methods=['GET'])
+def buscar_serial():
+    """Rastreabilidade: busca um nº de série de peça (velha ou nova) em TODAS as OS
+    da filial. Usado pra checar, numa reclamação de garantia, em qual manutenção a
+    peça foi instalada/retirada."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    termo = (request.args.get('serial') or '').strip().lower()
+    if len(termo) < 3:
+        return jsonify({"error": "Informe ao menos 3 caracteres do número de série."}), 400
+    resultados = []
+    for owner, d in _all_filial_drafts(full_data, user):
+        for p in (d.get('parts') or []):
+            sa = (p.get('serialAntigo') or '').strip()
+            sn = (p.get('serialNovo') or '').strip()
+            achou = []
+            if sa and termo in sa.lower():
+                achou.append(('retirada', sa))
+            if sn and termo in sn.lower():
+                achou.append(('instalada', sn))
+            for papel, serial in achou:
+                resultados.append({
+                    "papel": papel,  # 'instalada' (peça nova) ou 'retirada' (peça velha)
+                    "serial": serial,
+                    "peca": p.get('description') or p.get('code') or '—',
+                    "osNumero": d.get('omieOsNumber') or '—',
+                    "osId": d.get('id'),
+                    "crmOpNum": d.get('crmOpNum') or '',
+                    "cliente": (d.get('client') or {}).get('name') or '—',
+                    "data": d.get('sentAt') or d.get('updatedAt') or d.get('createdAt') or '',
+                    "responsavel": _responsavel_nome(full_data, owner),
+                })
+    return jsonify({"resultados": resultados, "total": len(resultados)})
+
+
 @app.route('/api/os/<os_id>', methods=['DELETE'])
 def os_delete(os_id):
     user, full_data, err = _require_user()
@@ -3681,6 +3743,8 @@ HTML_PAGE = """
             const [loadingCrm, setLoadingCrm] = useState(false);
             const [crmFiltro, setCrmFiltro] = useState('todas'); // todas | analise | preparacao
             const [puxandoCrm, setPuxandoCrm] = useState(null); // nCodOp sendo puxado
+            const [serialBusca, setSerialBusca] = useState('');
+            const [serialResultados, setSerialResultados] = useState(null); // null = não buscou ainda
 
             // DADOS GLOBAIS (Admin dita as regras)
             const [headerConfig, setHeaderConfig] = useState([]);
@@ -3921,6 +3985,19 @@ HTML_PAGE = """
                     fetchOsDrafts(); // pra marcar quais oportunidades já viraram OS
                 }
             }, [activeTab, auth]);
+
+            const buscarSerial = async () => {
+                const termo = (serialBusca || '').trim();
+                if (termo.length < 3) { alert('Digite ao menos 3 caracteres do número de série.'); return; }
+                setSerialResultados('loading');
+                try {
+                    const d = await fetch(`/api/pecas/buscar-serial?serial=${encodeURIComponent(termo)}`, { headers: { 'Authorization': auth.token } }).then(r => r.json());
+                    setSerialResultados(d.resultados || []);
+                } catch (e) {
+                    setSerialResultados([]);
+                    alert('Erro de rede: ' + (e.message || e));
+                }
+            };
 
             const moverFaseCrm = async (nCodOp, nCodFase, nomeFase) => {
                 if (!confirm(`Mover esta oportunidade para "${nomeFase}"?`)) return;
@@ -6062,9 +6139,12 @@ HTML_PAGE = """
                                                     ${draftDaOp ? (draftDaOp.omieOsNumber ? html`<span className="bg-green-100 text-green-700 px-2 py-0.5 rounded font-bold whitespace-nowrap"><i className="ph-fill ph-check-circle"></i> OS ${draftDaOp.omieOsNumber}</span>` : html`<span className="bg-slate-200 text-slate-600 px-2 py-0.5 rounded font-bold whitespace-nowrap">rascunho</span>`) : html`<span className="text-slate-300">—</span>`}
                                                 </td>
                                                 <td className="p-3 text-right">
-                                                    <button onClick=${() => puxarOportunidadeParaLaudo(o.nCodOp)} disabled=${puxandoCrm === o.nCodOp} className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded text-xs font-medium whitespace-nowrap disabled:bg-slate-400">
-                                                        ${puxandoCrm === o.nCodOp ? html`<i className="ph ph-spinner animate-spin"></i> Carregando...` : html`<i className="ph-bold ph-file-text"></i> Carregar laudo`}
-                                                    </button>
+                                                    <div className="flex gap-1 justify-end flex-wrap">
+                                                        ${draftDaOp && html`<button onClick=${() => { setCurrentOs(draftDaOp); setActiveTab('os'); }} className="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded text-xs font-medium whitespace-nowrap" title="Abrir a OS para ver serviços/peças e registrar substituições"><i className="ph-bold ph-wrench"></i> Abrir OS</button>`}
+                                                        <button onClick=${() => puxarOportunidadeParaLaudo(o.nCodOp)} disabled=${puxandoCrm === o.nCodOp} className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded text-xs font-medium whitespace-nowrap disabled:bg-slate-400">
+                                                            ${puxandoCrm === o.nCodOp ? html`<i className="ph ph-spinner animate-spin"></i> Carregando...` : html`<i className="ph-bold ph-file-text"></i> Carregar laudo`}
+                                                        </button>
+                                                    </div>
                                                 </td>
                                             </tr>
                                         `})}
@@ -6082,6 +6162,28 @@ HTML_PAGE = """
                     const updateOs = (patch) => setCurrentOs(prev => ({ ...prev, ...patch }));
                     const updateService = (i, patch) => updateOs({ services: currentOs.services.map((s, idx) => idx === i ? { ...s, ...patch } : s) });
                     const updatePart = (i, patch) => updateOs({ parts: currentOs.parts.map((p, idx) => idx === i ? { ...p, ...patch } : p) });
+                    const setPartPhoto = (i, campo, file) => {
+                        if (!file) return;
+                        const reader = new FileReader();
+                        reader.onload = async () => {
+                            let src = reader.result;
+                            try { src = await compressImage(src, 1400); } catch (e) {}
+                            updatePart(i, { [campo]: src });
+                        };
+                        reader.readAsDataURL(file);
+                    };
+                    const salvarSubstituicoes = async () => {
+                        try {
+                            const r = await fetch(`/api/os/${currentOs.id}/registrar-pecas`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                                body: JSON.stringify({ parts: currentOs.parts })
+                            });
+                            const d = await r.json();
+                            if (d.success) { alert('Registro de substituição de peças salvo!'); fetchOsDrafts(); }
+                            else alert('Erro: ' + (d.error || 'falha ao salvar'));
+                        } catch (e) { alert('Erro de rede: ' + (e.message || e)); }
+                    };
                     const addService = () => updateOs({ services: [...(currentOs.services || []), { omieServiceId: null, code: '', description: '', quantity: 1, unitPrice: 0 }] });
                     const removeService = (i) => updateOs({ services: currentOs.services.filter((_, idx) => idx !== i) });
                     const addPart = () => updateOs({ parts: [...(currentOs.parts || []), { omieProductId: null, code: '', description: '', quantity: 1, unitPrice: 0 }] });
@@ -6253,11 +6355,37 @@ HTML_PAGE = """
                                                             <input type="number" min="0" step="0.01" value=${p.unitPrice} onChange=${e => updatePart(i, { unitPrice: e.target.value })} className="w-24 p-1.5 border border-slate-300 rounded text-sm" disabled=${isLocked} />
                                                             <div className="ml-auto text-sm font-bold text-slate-700">= R$ ${((parseFloat(p.quantity)||0) * (parseFloat(p.unitPrice)||0)).toFixed(2)}</div>
                                                         </div>
+                                                        <div className="mt-3 pt-3 border-t border-dashed border-slate-300">
+                                                            <label className="flex items-center gap-2 cursor-pointer text-sm font-medium text-slate-700">
+                                                                <input type="checkbox" checked=${p.substituida || false} onChange=${e => updatePart(i, { substituida: e.target.checked })} className="w-4 h-4 text-amber-600" />
+                                                                <i className="ph-bold ph-arrows-left-right text-amber-600"></i> Peça substituída — registrar troca (nº de série)
+                                                            </label>
+                                                            ${p.substituida && html`
+                                                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+                                                                    <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                                                                        <div className="text-xs font-bold text-red-700 uppercase mb-1"><i className="ph-fill ph-wrench"></i> Peça retirada (velha)</div>
+                                                                        <input type="text" placeholder="Nº de série da peça velha" value=${p.serialAntigo || ''} onChange=${e => updatePart(i, { serialAntigo: e.target.value })} className="w-full p-1.5 border border-slate-300 rounded text-sm mb-2 font-mono" />
+                                                                        ${p.fotoSerialAntigo ? html`<div className="relative"><img src=${p.fotoSerialAntigo} className="w-full h-28 object-contain border rounded bg-white" /><button onClick=${() => updatePart(i, { fotoSerialAntigo: null })} className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-6 h-6 text-xs"><i className="ph ph-x"></i></button></div>` : html`<label className="flex items-center justify-center gap-1 text-xs bg-white border border-dashed border-red-300 rounded p-3 cursor-pointer text-red-600 hover:bg-red-50"><i className="ph-bold ph-camera"></i> Foto do nº de série<input type="file" accept="image/*" capture="environment" className="hidden" onChange=${e => setPartPhoto(i, 'fotoSerialAntigo', e.target.files[0])} /></label>`}
+                                                                    </div>
+                                                                    <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3">
+                                                                        <div className="text-xs font-bold text-emerald-700 uppercase mb-1"><i className="ph-fill ph-seal-check"></i> Peça nova (instalada)</div>
+                                                                        <input type="text" placeholder="Nº de série da peça nova" value=${p.serialNovo || ''} onChange=${e => updatePart(i, { serialNovo: e.target.value })} className="w-full p-1.5 border border-slate-300 rounded text-sm mb-2 font-mono" />
+                                                                        ${p.fotoSerialNovo ? html`<div className="relative"><img src=${p.fotoSerialNovo} className="w-full h-28 object-contain border rounded bg-white" /><button onClick=${() => updatePart(i, { fotoSerialNovo: null })} className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-6 h-6 text-xs"><i className="ph ph-x"></i></button></div>` : html`<label className="flex items-center justify-center gap-1 text-xs bg-white border border-dashed border-emerald-300 rounded p-3 cursor-pointer text-emerald-600 hover:bg-emerald-50"><i className="ph-bold ph-camera"></i> Foto do nº de série<input type="file" accept="image/*" capture="environment" className="hidden" onChange=${e => setPartPhoto(i, 'fotoSerialNovo', e.target.files[0])} /></label>`}
+                                                                    </div>
+                                                                </div>
+                                                            `}
+                                                        </div>
                                                     </div>
                                                     ${!isLocked && html`<button onClick=${() => removePart(i)} className="text-red-500 hover:bg-red-50 p-2 rounded"><i className="ph-bold ph-trash"></i></button>`}
                                                 </div>
                                             </div>
                                         `)}
+                                    </div>
+                                `}
+                                ${(currentOs.parts || []).some(p => p.substituida) && html`
+                                    <div className="mt-3 flex items-center justify-between gap-2 bg-amber-50 border border-amber-200 rounded-lg p-3">
+                                        <span className="text-xs text-amber-800">Registros de substituição (nº de série + fotos) ficam salvos para rastreabilidade de garantia.</span>
+                                        <button onClick=${salvarSubstituicoes} className="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg font-medium text-sm whitespace-nowrap"><i className="ph-bold ph-floppy-disk"></i> Salvar substituições</button>
                                     </div>
                                 `}
                             </div>
@@ -6288,6 +6416,34 @@ HTML_PAGE = """
                             </div>
                             <button onClick=${checkOmieStatus} className="text-sm bg-white border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50" title="Testar conexão"><i className="ph-bold ph-arrows-clockwise"></i> Testar</button>
                             <button onClick=${clearOmieCache} className="text-sm bg-white border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50" title="Limpa cache local de catálogos do Omie"><i className="ph-bold ph-broom"></i> Limpar cache</button>
+                        </div>
+
+                        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                            <h2 className="text-xl font-semibold text-slate-800 flex items-center gap-2 mb-1"><i className="ph-fill ph-magnifying-glass text-purple-600 text-2xl"></i> Rastrear peça por nº de série</h2>
+                            <p className="text-sm text-slate-500 mb-3">Numa reclamação de garantia, busque o número de série pra ver em qual OS/manutenção a peça foi instalada (nova) ou retirada (velha).</p>
+                            <div className="flex gap-2">
+                                <input type="text" value=${serialBusca} onChange=${e => setSerialBusca(e.target.value)} onKeyDown=${e => { if (e.key === 'Enter') buscarSerial(); }} placeholder="Nº de série (mín. 3 caracteres)" className="flex-1 p-2 border border-slate-300 rounded-lg font-mono outline-none focus:ring-2 focus:ring-purple-400" />
+                                <button onClick=${buscarSerial} className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg font-medium"><i className="ph-bold ph-magnifying-glass"></i> Buscar</button>
+                            </div>
+                            ${serialResultados === 'loading' && html`<div className="text-sm text-slate-500 mt-3"><i className="ph ph-spinner animate-spin"></i> Buscando...</div>`}
+                            ${Array.isArray(serialResultados) && (serialResultados.length === 0 ? html`<div className="text-sm text-slate-400 mt-3">Nenhuma peça encontrada com esse número de série.</div>` : html`
+                                <div className="mt-3 overflow-x-auto rounded border border-slate-200">
+                                    <table className="min-w-full text-sm">
+                                        <thead className="bg-slate-100 text-slate-700"><tr><th className="p-2 text-left">Situação</th><th className="p-2 text-left">Nº Série</th><th className="p-2 text-left">Peça</th><th className="p-2 text-left">OS</th><th className="p-2 text-left">Oportun.</th><th className="p-2 text-left">Cliente</th><th className="p-2 text-left">Data</th></tr></thead>
+                                        <tbody className="divide-y divide-slate-100">
+                                            ${serialResultados.map((r, idx) => html`<tr key=${idx} className="hover:bg-slate-50">
+                                                <td className="p-2"><span className=${r.papel === 'instalada' ? 'bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded text-xs font-bold whitespace-nowrap' : 'bg-red-100 text-red-700 px-2 py-0.5 rounded text-xs font-bold whitespace-nowrap'}>${r.papel === 'instalada' ? 'Instalada (nova)' : 'Retirada (velha)'}</span></td>
+                                                <td className="p-2 font-mono text-xs">${r.serial}</td>
+                                                <td className="p-2 text-xs">${r.peca}</td>
+                                                <td className="p-2 text-xs font-mono">${r.osNumero}</td>
+                                                <td className="p-2 text-xs font-mono">${r.crmOpNum || '—'}</td>
+                                                <td className="p-2 text-xs">${r.cliente}</td>
+                                                <td className="p-2 text-xs">${(r.data || '').slice(0, 10)}</td>
+                                            </tr>`)}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            `)}
                         </div>
 
                         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
