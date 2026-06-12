@@ -181,10 +181,45 @@ def _latest_backup():
 # As fotos dos laudos salvos vão pra arquivos; no JSON fica só uma referência "asset://...".
 # O contrato externo (base64) é preservado: save externaliza, load/export reinflam.
 ASSET_DIR = os.path.join(os.path.dirname(DATA_FILE) or '.', 'laudo_assets')
+LAUDO_PDF_DIR = os.path.join(os.path.dirname(DATA_FILE) or '.', 'laudos_pdf')
 
 
 def _safe_name(s):
     return re.sub(r'[^a-zA-Z0-9_.-]', '_', str(s))[:80]
+
+
+def _arquivar_pdf_laudo(full_data, pdf_bytes, meta):
+    """Salva o PDF do laudo no disco persistente (/data/laudos_pdf/AAAA/MM/) e registra
+    no índice full_data['laudoArquivos'] (metadados leves p/ relatórios). NÃO chama save_data
+    (o endpoint que chamou já persiste). Retorna o registro ou None em falha."""
+    try:
+        now = datetime.utcnow()
+        subdir = os.path.join(LAUDO_PDF_DIR, now.strftime('%Y'), now.strftime('%m'))
+        os.makedirs(subdir, exist_ok=True)
+        cliente = _safe_name(meta.get('cliente') or 'cliente')
+        osnum = _safe_name(meta.get('osNum') or now.strftime('%H%M%S'))
+        fname = f"{cliente}_{osnum}_{int(now.timestamp())}.pdf"
+        fpath = os.path.join(subdir, fname)
+        with open(fpath, 'wb') as f:
+            f.write(pdf_bytes)
+        rel = os.path.relpath(fpath, LAUDO_PDF_DIR).replace('\\', '/')
+        registro = {
+            "rel": rel,
+            "cliente": meta.get('cliente') or '',
+            "osNum": meta.get('osNum') or '',
+            "equipamento": meta.get('equipamento') or '',
+            "tecnico": meta.get('tecnico') or '',
+            "laudoId": meta.get('laudoId') or '',
+            "crmOpNum": meta.get('crmOpNum') or '',
+            "bytes": len(pdf_bytes),
+            "criadoEm": now.isoformat() + "Z",
+        }
+        arquivos = full_data.setdefault('laudoArquivos', [])
+        arquivos.append(registro)
+        return registro
+    except Exception as e:
+        print(f"[ARQUIVAR PDF] falha: {e}", flush=True)
+        return None
 
 
 def _mime_ext(data_uri):
@@ -792,6 +827,52 @@ def manage_laudos():
             _delete_laudo_assets(user, lid)
             save_data(full_data)
         return jsonify({"success": True})
+
+
+@app.route('/api/admin/laudos-arquivados', methods=['GET'])
+def listar_laudos_arquivados():
+    """Lista os PDFs de laudo arquivados no disco do servidor, com filtros (admin)."""
+    user, full_data, err = _require_admin()
+    if err:
+        return err
+    cliente = (request.args.get('cliente') or '').strip().lower()
+    equip = (request.args.get('equipamento') or '').strip().lower()
+    tecnico = (request.args.get('tecnico') or '').strip().lower()
+    de = request.args.get('de')   # YYYY-MM-DD
+    ate = request.args.get('ate')
+    out = []
+    for a in full_data.get('laudoArquivos', []):
+        if cliente and cliente not in (a.get('cliente') or '').lower():
+            continue
+        if equip and equip not in (a.get('equipamento') or '').lower():
+            continue
+        if tecnico and tecnico not in (a.get('tecnico') or '').lower():
+            continue
+        d = (a.get('criadoEm') or '')[:10]
+        if de and d < de:
+            continue
+        if ate and d > ate:
+            continue
+        out.append(a)
+    out.sort(key=lambda x: x.get('criadoEm', ''), reverse=True)
+    return jsonify({"items": out, "total": len(out)})
+
+
+@app.route('/api/admin/laudo-arquivado', methods=['GET'])
+def baixar_laudo_arquivado():
+    """Serve um PDF arquivado pelo caminho relativo (admin). Protege contra path traversal."""
+    user, full_data, err = _require_admin()
+    if err:
+        return err
+    rel = request.args.get('rel') or ''
+    base = os.path.normpath(LAUDO_PDF_DIR)
+    full = os.path.normpath(os.path.join(LAUDO_PDF_DIR, rel))
+    if not full.startswith(base) or not os.path.isfile(full):
+        return jsonify({"error": "Arquivo não encontrado"}), 404
+    with open(full, 'rb') as f:
+        data = f.read()
+    return Response(data, mimetype='application/pdf',
+                    headers={'Content-Disposition': f'attachment; filename="{os.path.basename(full)}"'})
 
 
 @app.route('/api/filiais', methods=['GET', 'POST', 'DELETE'])
@@ -3127,6 +3208,16 @@ def gerar_pdf_download():
         pdf_bytes = _gerar_pdf_laudo(payload)
     except Exception as e:
         return jsonify({"error": f"Falha ao gerar PDF: {e}"}), 500
+    # Arquiva automaticamente o laudo no disco do servidor
+    hd = payload.get('headerData') or {}
+    cli_field = next((f for f in (payload.get('headerConfig') or []) if f.get('id') == 'client'), None)
+    _arquivar_pdf_laudo(full_data, pdf_bytes, {
+        "cliente": (hd.get(cli_field['id']) if cli_field else '') or '',
+        "equipamento": payload.get('modelName') or '',
+        "tecnico": payload.get('technician') or user,
+        "laudoId": hd.get('laudoId') or '',
+    })
+    save_data(full_data)
     filename = payload.get('filename') or 'laudo.pdf'
     return Response(pdf_bytes, mimetype='application/pdf',
                     headers={'Content-Disposition': f'attachment; filename="{filename}"'})
@@ -3161,6 +3252,16 @@ def os_gerar_pdf_anexar(os_id):
         pdf_bytes = _gerar_pdf_laudo(payload)
     except Exception as e:
         return jsonify({"error": f"Falha ao gerar PDF: {e}"}), 500
+
+    # Arquiva automaticamente o laudo no disco do servidor
+    _arquivar_pdf_laudo(full_data, pdf_bytes, {
+        "cliente": (draft.get('client') or {}).get('name') or '',
+        "osNum": draft.get('omieOsNumber') or '',
+        "equipamento": payload.get('modelName') or (draft.get('fromLaudo') or {}).get('model') or '',
+        "tecnico": payload.get('technician') or owner,
+        "laudoId": draft.get('laudoId') or '',
+        "crmOpNum": draft.get('crmOpNum') or '',
+    })
 
     filename = f"laudo_OS_{draft.get('omieOsNumber') or os_id}.pdf"
 
@@ -3746,6 +3847,10 @@ HTML_PAGE = """
             const [puxandoCrm, setPuxandoCrm] = useState(null); // nCodOp sendo puxado
             const [serialBusca, setSerialBusca] = useState('');
             const [serialResultados, setSerialResultados] = useState(null); // null = não buscou ainda
+            const [arquivados, setArquivados] = useState(null);
+            const [arqCli, setArqCli] = useState('');
+            const [arqDe, setArqDe] = useState('');
+            const [arqAte, setArqAte] = useState('');
 
             // DADOS GLOBAIS (Admin dita as regras)
             const [headerConfig, setHeaderConfig] = useState([]);
@@ -3986,6 +4091,25 @@ HTML_PAGE = """
                     fetchOsDrafts(); // pra marcar quais oportunidades já viraram OS
                 }
             }, [activeTab, auth]);
+
+            const fetchArquivados = () => {
+                const qs = new URLSearchParams();
+                if (arqCli) qs.set('cliente', arqCli);
+                if (arqDe) qs.set('de', arqDe);
+                if (arqAte) qs.set('ate', arqAte);
+                setArquivados('loading');
+                fetch('/api/admin/laudos-arquivados?' + qs.toString(), { headers: { 'Authorization': auth.token } })
+                    .then(r => r.json()).then(d => setArquivados(d.items || [])).catch(() => setArquivados([]));
+            };
+            const baixarArquivado = async (rel) => {
+                try {
+                    const resp = await fetch('/api/admin/laudo-arquivado?rel=' + encodeURIComponent(rel), { headers: { 'Authorization': auth.token } });
+                    if (!resp.ok) { alert('Erro ao baixar o arquivo.'); return; }
+                    const blob = await resp.blob();
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a'); a.href = url; a.download = rel.split('/').pop(); a.click(); URL.revokeObjectURL(url);
+                } catch (e) { alert('Erro: ' + (e.message || e)); }
+            };
 
             const buscarSerial = async () => {
                 const termo = (serialBusca || '').trim();
@@ -5692,6 +5816,36 @@ HTML_PAGE = """
                                     <input type="file" accept=".json,application/json" onChange=${e => { const f = e.target.files[0]; if (f) importConfig(f); e.target.value=''; }} className="hidden" />
                                 </label>
                             </div>
+                        </div>
+
+                        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                            <h2 className="text-xl font-semibold mb-1 text-slate-800 flex items-center gap-2"><i className="ph-fill ph-archive-box text-teal-600 text-2xl"></i> Laudos Arquivados no Servidor</h2>
+                            <p className="text-sm text-slate-500 mb-3">Todo PDF de laudo gerado é salvo automaticamente no disco do servidor. Consulte e baixe aqui.</p>
+                            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 mb-3">
+                                <input type="text" value=${arqCli} onChange=${e => setArqCli(e.target.value)} placeholder="Cliente" className="p-2 border border-slate-300 rounded-lg text-sm" />
+                                <input type="date" value=${arqDe} onChange=${e => setArqDe(e.target.value)} className="p-2 border border-slate-300 rounded-lg text-sm" />
+                                <input type="date" value=${arqAte} onChange=${e => setArqAte(e.target.value)} className="p-2 border border-slate-300 rounded-lg text-sm" />
+                                <button onClick=${fetchArquivados} className="bg-teal-600 hover:bg-teal-700 text-white px-4 py-2 rounded-lg font-medium text-sm"><i className="ph-bold ph-magnifying-glass"></i> Buscar</button>
+                            </div>
+                            ${arquivados === 'loading' && html`<div className="text-sm text-slate-500"><i className="ph ph-spinner animate-spin"></i> Carregando...</div>`}
+                            ${Array.isArray(arquivados) && (arquivados.length === 0 ? html`<div className="text-sm text-slate-400">Nenhum laudo arquivado (com esses filtros).</div>` : html`
+                                <div className="text-xs text-slate-500 mb-1">${arquivados.length} laudo(s)</div>
+                                <div className="overflow-x-auto rounded border border-slate-200 max-h-96 overflow-y-auto">
+                                    <table className="min-w-full text-sm">
+                                        <thead className="bg-slate-100 text-slate-700 sticky top-0"><tr><th className="p-2 text-left">Data</th><th className="p-2 text-left">Cliente</th><th className="p-2 text-left">Equipamento</th><th className="p-2 text-left">OS</th><th className="p-2 text-left">Técnico</th><th className="p-2 text-right">Ação</th></tr></thead>
+                                        <tbody className="divide-y divide-slate-100">
+                                            ${arquivados.map((a, idx) => html`<tr key=${idx} className="hover:bg-slate-50">
+                                                <td className="p-2 text-xs whitespace-nowrap">${(a.criadoEm || '').slice(0, 10)}</td>
+                                                <td className="p-2 text-xs">${a.cliente || '—'}</td>
+                                                <td className="p-2 text-xs">${a.equipamento || '—'}</td>
+                                                <td className="p-2 text-xs font-mono">${a.osNum || '—'}</td>
+                                                <td className="p-2 text-xs">${a.tecnico || '—'}</td>
+                                                <td className="p-2 text-right"><button onClick=${() => baixarArquivado(a.rel)} className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-3 py-1 rounded text-xs font-medium"><i className="ph-bold ph-download-simple"></i> Baixar</button></td>
+                                            </tr>`)}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            `)}
                         </div>
 
                         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
