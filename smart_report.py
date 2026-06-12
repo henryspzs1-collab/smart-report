@@ -858,6 +858,95 @@ def listar_laudos_arquivados():
     return jsonify({"items": out, "total": len(out)})
 
 
+@app.route('/api/admin/relatorio', methods=['GET'])
+def relatorio_gerencial():
+    """Relatório gerencial (admin): agrega OS da filial — peças, serviços, técnico,
+    cliente, equipamento, valores — com filtros. Tempo nas fases entra numa fase 2."""
+    user, full_data, err = _require_admin()
+    if err:
+        return err
+    f_de = request.args.get('de')           # YYYY-MM-DD
+    f_ate = request.args.get('ate')
+    f_cli = (request.args.get('cliente') or '').strip().lower()
+    f_equip = (request.args.get('equipamento') or '').strip().lower()
+    f_tec = (request.args.get('tecnico') or '').strip().lower()
+
+    items = []
+    resumo = {
+        "totalOS": 0, "valorTotal": 0.0, "valorServicos": 0.0, "valorPecas": 0.0,
+        "qtdPecas": 0, "qtdServicos": 0, "qtdSubstituicoes": 0,
+    }
+    por_tecnico = {}
+    por_equip = {}
+    por_mes = {}
+    top_pecas = {}
+    top_servicos = {}
+
+    for owner, d in _all_filial_drafts(full_data, user):
+        cliente = (d.get('client') or {}).get('name') or ''
+        equipamento = (d.get('fromLaudo') or {}).get('model') or ''
+        tecnico = _responsavel_nome(full_data, d.get('createdBy') or owner)
+        data_iso = d.get('sentAt') or d.get('updatedAt') or d.get('createdAt') or ''
+        data_dia = data_iso[:10]
+        # Filtros
+        if f_de and data_dia and data_dia < f_de:
+            continue
+        if f_ate and data_dia and data_dia > f_ate:
+            continue
+        if f_cli and f_cli not in cliente.lower():
+            continue
+        if f_equip and f_equip not in equipamento.lower():
+            continue
+        if f_tec and f_tec not in tecnico.lower():
+            continue
+
+        servicos = d.get('services') or []
+        pecas = d.get('parts') or []
+        v_serv = sum(float(s.get('quantity') or 0) * float(s.get('unitPrice') or 0) for s in servicos)
+        v_pecas = sum(float(p.get('quantity') or 0) * float(p.get('unitPrice') or 0) for p in pecas)
+        n_subs = sum(1 for p in pecas if p.get('substituida'))
+
+        items.append({
+            "osNum": d.get('omieOsNumber') or '', "crmOpNum": d.get('crmOpNum') or '',
+            "cliente": cliente, "equipamento": equipamento, "tecnico": tecnico,
+            "data": data_dia, "status": d.get('status') or '',
+            "qtdServicos": len(servicos), "qtdPecas": len(pecas), "substituicoes": n_subs,
+            "valorServicos": round(v_serv, 2), "valorPecas": round(v_pecas, 2),
+            "valorTotal": round(v_serv + v_pecas, 2),
+        })
+        resumo["totalOS"] += 1
+        resumo["valorServicos"] += v_serv
+        resumo["valorPecas"] += v_pecas
+        resumo["qtdServicos"] += len(servicos)
+        resumo["qtdPecas"] += len(pecas)
+        resumo["qtdSubstituicoes"] += n_subs
+        por_tecnico.setdefault(tecnico or '—', {"os": 0, "valor": 0.0})
+        por_tecnico[tecnico or '—']["os"] += 1
+        por_tecnico[tecnico or '—']["valor"] += v_serv + v_pecas
+        por_equip[equipamento or '—'] = por_equip.get(equipamento or '—', 0) + 1
+        mes = data_dia[:7] if data_dia else '—'
+        por_mes.setdefault(mes, {"os": 0, "valor": 0.0})
+        por_mes[mes]["os"] += 1
+        por_mes[mes]["valor"] += v_serv + v_pecas
+        for p in pecas:
+            nome = (p.get('description') or p.get('code') or '—')
+            top_pecas[nome] = top_pecas.get(nome, 0) + float(p.get('quantity') or 1)
+        for s in servicos:
+            nome = (s.get('description') or '—')[:60]
+            top_servicos[nome] = top_servicos.get(nome, 0) + float(s.get('quantity') or 1)
+
+    resumo["valorTotal"] = round(resumo["valorServicos"] + resumo["valorPecas"], 2)
+    resumo["valorServicos"] = round(resumo["valorServicos"], 2)
+    resumo["valorPecas"] = round(resumo["valorPecas"], 2)
+    resumo["porTecnico"] = sorted([{"nome": k, **v, "valor": round(v["valor"], 2)} for k, v in por_tecnico.items()], key=lambda x: -x["os"])
+    resumo["porEquipamento"] = sorted([{"equip": k, "os": v} for k, v in por_equip.items()], key=lambda x: -x["os"])
+    resumo["porMes"] = sorted([{"mes": k, **v, "valor": round(v["valor"], 2)} for k, v in por_mes.items()], key=lambda x: x["mes"])
+    resumo["topPecas"] = sorted([{"desc": k, "qtd": v} for k, v in top_pecas.items()], key=lambda x: -x["qtd"])[:10]
+    resumo["topServicos"] = sorted([{"desc": k, "qtd": v} for k, v in top_servicos.items()], key=lambda x: -x["qtd"])[:10]
+    items.sort(key=lambda x: x.get('data', ''), reverse=True)
+    return jsonify({"items": items, "resumo": resumo})
+
+
 @app.route('/api/admin/laudo-arquivado', methods=['GET'])
 def baixar_laudo_arquivado():
     """Serve um PDF arquivado pelo caminho relativo (admin). Protege contra path traversal."""
@@ -3851,6 +3940,12 @@ HTML_PAGE = """
             const [arqCli, setArqCli] = useState('');
             const [arqDe, setArqDe] = useState('');
             const [arqAte, setArqAte] = useState('');
+            const [relatorio, setRelatorio] = useState(null);
+            const [relDe, setRelDe] = useState('');
+            const [relAte, setRelAte] = useState('');
+            const [relCli, setRelCli] = useState('');
+            const [relEquip, setRelEquip] = useState('');
+            const [relTec, setRelTec] = useState('');
 
             // DADOS GLOBAIS (Admin dita as regras)
             const [headerConfig, setHeaderConfig] = useState([]);
@@ -4109,6 +4204,29 @@ HTML_PAGE = """
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a'); a.href = url; a.download = rel.split('/').pop(); a.click(); URL.revokeObjectURL(url);
                 } catch (e) { alert('Erro: ' + (e.message || e)); }
+            };
+
+            const fetchRelatorio = () => {
+                const qs = new URLSearchParams();
+                if (relDe) qs.set('de', relDe);
+                if (relAte) qs.set('ate', relAte);
+                if (relCli) qs.set('cliente', relCli);
+                if (relEquip) qs.set('equipamento', relEquip);
+                if (relTec) qs.set('tecnico', relTec);
+                setRelatorio('loading');
+                fetch('/api/admin/relatorio?' + qs.toString(), { headers: { 'Authorization': auth.token } })
+                    .then(r => r.json()).then(setRelatorio).catch(() => setRelatorio(null));
+            };
+            useEffect(() => {
+                if (auth && auth.role === 'admin' && activeTab === 'relatorios' && relatorio === null) fetchRelatorio();
+            }, [activeTab, auth]);
+            const exportRelatorioCSV = () => {
+                if (!relatorio || !relatorio.items) return;
+                const head = ['Data', 'OS', 'Oportunidade', 'Cliente', 'Equipamento', 'Tecnico', 'Qtd Servicos', 'Qtd Pecas', 'Substituicoes', 'R$ Servicos', 'R$ Pecas', 'R$ Total'];
+                const rows = relatorio.items.map(i => [i.data, i.osNum, i.crmOpNum, i.cliente, i.equipamento, i.tecnico, i.qtdServicos, i.qtdPecas, i.substituicoes, i.valorServicos, i.valorPecas, i.valorTotal]);
+                const csv = [head, ...rows].map(r => r.map(c => '"' + String(c == null ? '' : c).replace(/"/g, '""') + '"').join(';')).join('\\n');
+                const blob = new Blob(['\\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
+                const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'relatorio_biodron.csv'; a.click(); URL.revokeObjectURL(url);
             };
 
             const buscarSerial = async () => {
@@ -5796,6 +5914,91 @@ HTML_PAGE = """
                 `;
             };
 
+            const renderRelatorios = () => {
+                const r = relatorio;
+                const fmt = (v) => 'R$ ' + parseFloat(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                const barra = (label, valor, max, cor, sufixo) => html`
+                    <div className="mb-2">
+                        <div className="flex justify-between text-xs mb-0.5"><span className="text-slate-600 truncate pr-2">${label}</span><span className="font-bold text-slate-700 whitespace-nowrap">${sufixo || valor}</span></div>
+                        <div className="bg-slate-100 rounded-full h-2.5"><div className=${'h-2.5 rounded-full ' + cor} style=${{ width: (max > 0 ? Math.max(valor / max * 100, 2) : 0) + '%' }}></div></div>
+                    </div>`;
+                return html`
+                    <div className="space-y-5 animate-in fade-in duration-300">
+                        <div className="bg-white p-4 rounded-xl border border-slate-200 flex flex-col md:flex-row md:items-end gap-3 justify-between">
+                            <div>
+                                <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2"><i className="ph-fill ph-chart-bar text-teal-600 text-2xl"></i> Relatórios Gerenciais</h2>
+                                <p className="text-sm text-slate-500 mt-1">Peças, serviços, técnico e valores das OS da filial. (Tempo nas fases do CRM: em breve.)</p>
+                            </div>
+                            <div className="flex gap-2 flex-wrap items-end">
+                                <div><label className="block text-xs text-slate-500">De</label><input type="date" value=${relDe} onChange=${e => setRelDe(e.target.value)} className="p-2 border border-slate-300 rounded text-sm" /></div>
+                                <div><label className="block text-xs text-slate-500">Até</label><input type="date" value=${relAte} onChange=${e => setRelAte(e.target.value)} className="p-2 border border-slate-300 rounded text-sm" /></div>
+                                <input type="text" value=${relCli} onChange=${e => setRelCli(e.target.value)} placeholder="Cliente" className="p-2 border border-slate-300 rounded text-sm w-32" />
+                                <input type="text" value=${relEquip} onChange=${e => setRelEquip(e.target.value)} placeholder="Equipamento" className="p-2 border border-slate-300 rounded text-sm w-32" />
+                                <input type="text" value=${relTec} onChange=${e => setRelTec(e.target.value)} placeholder="Técnico" className="p-2 border border-slate-300 rounded text-sm w-28" />
+                                <button onClick=${fetchRelatorio} className="bg-teal-600 hover:bg-teal-700 text-white px-4 py-2 rounded font-medium text-sm"><i className="ph-bold ph-magnifying-glass"></i> Filtrar</button>
+                            </div>
+                        </div>
+
+                        ${r === 'loading' && html`<div className="text-center py-10 text-slate-500"><i className="ph ph-spinner animate-spin text-2xl"></i></div>`}
+                        ${r && r !== 'loading' && r.resumo && html`
+                            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                                <div className="bg-white p-4 rounded-xl border border-slate-200"><div className="text-xs text-slate-500 uppercase">OS no período</div><div className="text-2xl font-bold text-slate-800">${r.resumo.totalOS}</div></div>
+                                <div className="bg-white p-4 rounded-xl border border-slate-200"><div className="text-xs text-slate-500 uppercase">Valor total</div><div className="text-xl font-bold text-emerald-600">${fmt(r.resumo.valorTotal)}</div></div>
+                                <div className="bg-white p-4 rounded-xl border border-slate-200"><div className="text-xs text-slate-500 uppercase">Serviços</div><div className="text-xl font-bold text-blue-600">${fmt(r.resumo.valorServicos)}</div><div className="text-xs text-slate-400">${r.resumo.qtdServicos} itens</div></div>
+                                <div className="bg-white p-4 rounded-xl border border-slate-200"><div className="text-xs text-slate-500 uppercase">Peças</div><div className="text-xl font-bold text-purple-600">${fmt(r.resumo.valorPecas)}</div><div className="text-xs text-slate-400">${r.resumo.qtdPecas} itens</div></div>
+                                <div className="bg-white p-4 rounded-xl border border-slate-200"><div className="text-xs text-slate-500 uppercase">Substituições</div><div className="text-2xl font-bold text-amber-600">${r.resumo.qtdSubstituicoes}</div></div>
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="bg-white p-5 rounded-xl border border-slate-200">
+                                    <h3 className="font-semibold text-slate-700 mb-3 flex items-center gap-2"><i className="ph-fill ph-user-gear text-blue-600"></i> Por técnico</h3>
+                                    ${(r.resumo.porTecnico || []).length === 0 ? html`<div className="text-sm text-slate-400">Sem dados.</div>` : r.resumo.porTecnico.map(t => barra(t.nome, t.os, Math.max(...r.resumo.porTecnico.map(x => x.os)), 'bg-blue-500', `${t.os} OS · ${fmt(t.valor)}`))}
+                                </div>
+                                <div className="bg-white p-5 rounded-xl border border-slate-200">
+                                    <h3 className="font-semibold text-slate-700 mb-3 flex items-center gap-2"><i className="ph-fill ph-wrench text-indigo-600"></i> Por equipamento</h3>
+                                    ${(r.resumo.porEquipamento || []).length === 0 ? html`<div className="text-sm text-slate-400">Sem dados.</div>` : r.resumo.porEquipamento.slice(0, 8).map(t => barra(t.equip, t.os, Math.max(...r.resumo.porEquipamento.map(x => x.os)), 'bg-indigo-500', t.os + ' OS'))}
+                                </div>
+                                <div className="bg-white p-5 rounded-xl border border-slate-200">
+                                    <h3 className="font-semibold text-slate-700 mb-3 flex items-center gap-2"><i className="ph-fill ph-calendar text-emerald-600"></i> Por mês</h3>
+                                    ${(r.resumo.porMes || []).length === 0 ? html`<div className="text-sm text-slate-400">Sem dados.</div>` : r.resumo.porMes.map(t => barra(t.mes, t.os, Math.max(...r.resumo.porMes.map(x => x.os)), 'bg-emerald-500', `${t.os} OS · ${fmt(t.valor)}`))}
+                                </div>
+                                <div className="bg-white p-5 rounded-xl border border-slate-200">
+                                    <h3 className="font-semibold text-slate-700 mb-3 flex items-center gap-2"><i className="ph-fill ph-package text-purple-600"></i> Peças mais usadas</h3>
+                                    ${(r.resumo.topPecas || []).length === 0 ? html`<div className="text-sm text-slate-400">Sem dados.</div>` : r.resumo.topPecas.map(t => barra(t.desc, t.qtd, Math.max(...r.resumo.topPecas.map(x => x.qtd)), 'bg-purple-500', t.qtd + ' un'))}
+                                </div>
+                            </div>
+
+                            <div className="bg-white p-5 rounded-xl border border-slate-200">
+                                <div className="flex justify-between items-center mb-3">
+                                    <h3 className="font-semibold text-slate-700">Detalhamento (${(r.items || []).length} OS)</h3>
+                                    <div className="flex gap-2">
+                                        <button onClick=${exportRelatorioCSV} className="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded text-sm font-medium"><i className="ph-bold ph-microsoft-excel-logo"></i> Excel/CSV</button>
+                                        <button onClick=${() => window.print()} className="bg-slate-600 hover:bg-slate-700 text-white px-3 py-1.5 rounded text-sm font-medium"><i className="ph-bold ph-printer"></i> PDF/Imprimir</button>
+                                    </div>
+                                </div>
+                                <div className="overflow-x-auto rounded border border-slate-200 max-h-[500px] overflow-y-auto">
+                                    <table className="min-w-full text-sm">
+                                        <thead className="bg-slate-100 text-slate-700 sticky top-0"><tr><th className="p-2 text-left">Data</th><th className="p-2 text-left">OS</th><th className="p-2 text-left">Cliente</th><th className="p-2 text-left">Equipamento</th><th className="p-2 text-left">Técnico</th><th className="p-2 text-center">Serv.</th><th className="p-2 text-center">Peças</th><th className="p-2 text-right">Total</th></tr></thead>
+                                        <tbody className="divide-y divide-slate-100">
+                                            ${(r.items || []).map((i, idx) => html`<tr key=${idx} className="hover:bg-slate-50">
+                                                <td className="p-2 text-xs whitespace-nowrap">${i.data}</td>
+                                                <td className="p-2 text-xs font-mono">${i.osNum || '—'}</td>
+                                                <td className="p-2 text-xs">${i.cliente || '—'}</td>
+                                                <td className="p-2 text-xs">${i.equipamento || '—'}</td>
+                                                <td className="p-2 text-xs">${i.tecnico || '—'}</td>
+                                                <td className="p-2 text-xs text-center">${i.qtdServicos}</td>
+                                                <td className="p-2 text-xs text-center">${i.qtdPecas}${i.substituicoes ? html` <span className="text-amber-600" title="substituições">⇄${i.substituicoes}</span>` : ''}</td>
+                                                <td className="p-2 text-xs text-right font-bold">${fmt(i.valorTotal)}</td>
+                                            </tr>`)}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        `}
+                    </div>
+                `;
+            };
+
             const renderSettings = () => {
                 if(!currentEditingModel) return null;
 
@@ -6870,6 +7073,7 @@ HTML_PAGE = """
                             <button onClick=${() => setActiveTab('crm')} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'crm' ? 'bg-white text-amber-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}><i className="ph-bold ph-funnel"></i> Oportunidades (CRM)</button>
 
                             ${auth.role === 'admin' && html`
+                                <button onClick=${() => setActiveTab('relatorios')} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'relatorios' ? 'bg-white text-teal-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}><i className="ph-bold ph-chart-bar"></i> Relatórios</button>
                                 <button onClick=${() => setActiveTab('settings')} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'settings' ? 'bg-white text-indigo-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}><i className="ph-bold ph-gear"></i> Templates (Global)</button>
                                 <button onClick=${() => setActiveTab('users')} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'users' ? 'bg-white text-emerald-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}><i className="ph-bold ph-users"></i> Usuários</button>
                             `}
@@ -6879,6 +7083,7 @@ HTML_PAGE = """
                             ${activeTab === 'report' ? renderReportForm() : ''}
                             ${activeTab === 'os' ? renderOS() : ''}
                             ${activeTab === 'crm' ? renderCRM() : ''}
+                            ${activeTab === 'relatorios' && auth.role === 'admin' ? renderRelatorios() : ''}
                             ${activeTab === 'settings' && auth.role === 'admin' ? renderSettings() : ''}
                             ${activeTab === 'users' && auth.role === 'admin' ? renderUsers() : ''}
                         </main>
