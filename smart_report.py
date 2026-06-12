@@ -2141,7 +2141,8 @@ def os_create():
         "sendError": None,
         "crmOpId": body.get('crmOpId') or None,
         "crmOpNum": body.get('crmOpNum') or None,
-        "crmFaseCodigo": body.get('crmFaseCodigo') or None
+        "crmFaseCodigo": body.get('crmFaseCodigo') or None,
+        "laudoId": body.get('laudoId') or None
     }
     drafts = _user_drafts(full_data, user)
     drafts.append(draft)
@@ -2160,7 +2161,7 @@ def os_update(os_id):
         return jsonify({"error": "Rascunho não encontrado"}), 404
     if d['status'] == 'sent':
         return jsonify({"error": "OS já enviada não pode ser editada"}), 400
-    for k in ('client', 'services', 'parts', 'observations', 'fromLaudo'):
+    for k in ('client', 'services', 'parts', 'observations', 'fromLaudo', 'laudoId'):
         if k in body:
             d[k] = body[k]
     d['updatedAt'] = datetime.utcnow().isoformat() + "Z"
@@ -4164,7 +4165,7 @@ HTML_PAGE = """
                 });
             };
 
-            const generateOsFromCurrentLaudo = () => {
+            const generateOsFromCurrentLaudo = async () => {
                 const clientField = headerConfig.find(f => f.id === 'client');
                 const defectField = headerConfig.find(f => f.id === 'defect');
                 const clientName = clientField ? (headerData[clientField.id] || '') : '';
@@ -4175,6 +4176,10 @@ HTML_PAGE = """
                     modelName && `Modelo: ${modelName}`,
                     defect && `Defeito alegado pelo cliente: ${defect}`
                 ].filter(Boolean).join('\\n\\n');
+                // Salva o laudo no histórico e vincula à OS — permite consultar/editar o laudo
+                // depois, mesmo após a OS ter sido enviada ao Omie.
+                const laudoId = await salvarLaudoVinculado(headerData.laudoId, clientName ? `${clientName} — ${modelName || 'laudo'}` : null);
+                if (laudoId) setHeaderData(prev => ({ ...prev, laudoId }));
                 // Se o laudo veio de uma oportunidade do CRM, já temos o cliente de
                 // faturamento resolvido (por CPF/CNPJ) — vincula direto, sem busca por nome.
                 const clientPrefill = headerData.crmClienteOmieId
@@ -4184,6 +4189,7 @@ HTML_PAGE = """
                     fromLaudo: { client: clientName, model: modelName, defect, generatedAt: new Date().toISOString() },
                     client: clientPrefill,
                     observations: obs,
+                    laudoId: laudoId || null,
                     crmOpId: headerData.crmOpId || null,
                     crmOpNum: headerData.crmOpNum || null,
                     crmFaseCodigo: headerData.crmFaseCodigo || null
@@ -4365,6 +4371,8 @@ HTML_PAGE = """
                     try { data = JSON.parse(text); }
                     catch { alert(`Erro: resposta inválida (HTTP ${resp.status}): ${text.substring(0,200)}`); return; }
                     if (data.success) {
+                        // Mantém o laudo do histórico atualizado com o que foi re-anexado
+                        if (headerData.laudoId) { try { await salvarLaudoVinculado(headerData.laudoId); } catch (e) {} }
                         alert('PDF do laudo anexado à OS no Omie!');
                         const nextOs = { ...currentOs, pdfAnexado: true };
                         setCurrentOs(nextOs);
@@ -4698,6 +4706,12 @@ HTML_PAGE = """
                     } catch (e) { erros.push('CRM: ' + (e.message || e)); }
                 }
 
+                // Re-salva o laudo (versão final) vinculado à OS, antes de limpar a tela —
+                // permite consultar/editar o laudo depois mesmo com a OS já enviada.
+                if (!erros.length && (osAtual.laudoId || headerData.laudoId)) {
+                    try { await salvarLaudoVinculado(osAtual.laudoId || headerData.laudoId); } catch (e) {}
+                }
+
                 setFinalizando(false);
                 fetchOsDrafts();
 
@@ -4766,6 +4780,22 @@ HTML_PAGE = """
                     headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
                     body: JSON.stringify({ action: 'save', name: finalName, date: headerData.date, state })
                 }).then(r => r.json()).then(d => { if(d.success) { alert('Laudo salvo!'); fetchLaudos(); } });
+            };
+
+            // Salva (ou atualiza, se existingId) o laudo no histórico e retorna o id — usado pra vincular à OS.
+            const salvarLaudoVinculado = async (existingId, nome) => {
+                const compressed = await Promise.all((reportImages || []).map(async img => ({ ...img, src: await compressImage(img.src) })));
+                const state = { headerData, answers, diagramMarks, reportImages: compressed, pdfMargin, cellVoltages, motorResistances };
+                const clientField = headerConfig.find(f => f.id === 'client');
+                const clientName = clientField ? (headerData[clientField.id] || '') : '';
+                const finalName = nome || (clientName ? `${clientName} — ${headerData.date || new Date().toLocaleDateString('pt-BR')}` : 'Laudo ' + new Date().toLocaleDateString('pt-BR'));
+                const body = { action: 'save', name: finalName, date: headerData.date, state };
+                if (existingId) body.id = existingId;
+                try {
+                    const d = await fetch('/api/laudos', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': auth.token }, body: JSON.stringify(body) }).then(r => r.json());
+                    fetchLaudos();
+                    return d.id;
+                } catch (e) { return existingId || null; }
             };
 
             const loadLaudo = (id) => {
@@ -6205,9 +6235,15 @@ HTML_PAGE = """
                                     </h2>
                                 </div>
                                 <div className="flex gap-2 flex-wrap">
-                                    <button onClick=${irParaLaudoDesta} className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-4 py-2 rounded font-medium flex items-center gap-1 border border-blue-200">
-                                        <i className="ph-bold ph-file-text"></i> Preencher Laudo desta OS
-                                    </button>
+                                    ${currentOs.laudoId ? html`
+                                        <button onClick=${() => { if (confirm('Abrir o laudo desta OS para edição? O que estiver na tela de laudo será substituído.')) loadLaudo(currentOs.laudoId); }} className="bg-purple-50 hover:bg-purple-100 text-purple-700 px-4 py-2 rounded font-medium flex items-center gap-1 border border-purple-200">
+                                            <i className="ph-bold ph-pencil-simple"></i> Editar Laudo desta OS
+                                        </button>
+                                    ` : html`
+                                        <button onClick=${irParaLaudoDesta} className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-4 py-2 rounded font-medium flex items-center gap-1 border border-blue-200">
+                                            <i className="ph-bold ph-file-text"></i> Preencher Laudo desta OS
+                                        </button>
+                                    `}
                                     ${!isLocked && html`
                                         <button onClick=${() => saveCurrentOs(false)} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded font-medium flex items-center gap-1"><i className="ph-bold ph-floppy-disk"></i> Salvar</button>
                                         <button onClick=${sendOsToOmie} disabled=${omieStatus.checked && !omieStatus.ok} className=${`px-4 py-2 rounded font-medium flex items-center gap-1 text-white ${(omieStatus.checked && !omieStatus.ok) ? 'bg-slate-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'}`}>
