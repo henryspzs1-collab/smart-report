@@ -2380,7 +2380,9 @@ def os_create():
         "crmOpId": body.get('crmOpId') or None,
         "crmOpNum": body.get('crmOpNum') or None,
         "crmFaseCodigo": body.get('crmFaseCodigo') or None,
-        "laudoId": body.get('laudoId') or None
+        "laudoId": body.get('laudoId') or None,
+        "garantiaStatus": body.get('garantiaStatus') or 'avulsa',
+        "garantiaMotivo": body.get('garantiaMotivo') or ''
     }
     drafts = _user_drafts(full_data, user)
     drafts.append(draft)
@@ -2399,7 +2401,7 @@ def os_update(os_id):
         return jsonify({"error": "Rascunho não encontrado"}), 404
     if d['status'] == 'sent':
         return jsonify({"error": "OS já enviada não pode ser editada"}), 400
-    for k in ('client', 'services', 'parts', 'observations', 'fromLaudo', 'laudoId'):
+    for k in ('client', 'services', 'parts', 'observations', 'fromLaudo', 'laudoId', 'garantiaStatus', 'garantiaMotivo'):
         if k in body:
             d[k] = body[k]
     d['updatedAt'] = datetime.utcnow().isoformat() + "Z"
@@ -2737,6 +2739,199 @@ Escreva o laudo completo seguindo a estrutura acima, em texto puro (sem markdown
             return jsonify({"error": f"Falha de conexão com Gemini: {e.reason}"}), 502
 
     return jsonify({"error": f"Gemini: todos os modelos falharam. Último erro: {ultimo_erro}"}), 502
+
+
+def _orcamento_story(osq, page_break=True, titulo="Ordem de Serviço / Orçamento"):
+    """Monta os flowables da seção de Orçamento (serviços + peças com valores).
+    Reutilizado na página final do laudo (avulsa) E no PDF de orçamento standalone
+    (fluxo de garantia NEGADA, em que o parecer e o orçamento são documentos separados)."""
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.platypus import Paragraph, Spacer, Table, TableStyle, PageBreak
+
+    C_PRIMARY = colors.HexColor('#1e40af')
+    C_DARK = colors.HexColor('#1e293b')
+    C_LIGHT = colors.HexColor('#f1f5f9')
+    C_BORDER = colors.HexColor('#d1d5db')
+    C_MUTED = colors.HexColor('#6b7280')
+
+    styles = getSampleStyleSheet()
+    body = ParagraphStyle('o_body', parent=styles['BodyText'], fontSize=9, leading=12, textColor=C_DARK)
+    small = ParagraphStyle('o_small', parent=body, fontSize=8, textColor=C_MUTED)
+    h2 = ParagraphStyle('o_h2', parent=styles['Heading2'], fontSize=11, spaceBefore=4, spaceAfter=8, textColor=colors.white, fontName='Helvetica-Bold', leading=14)
+
+    def secao(t):
+        tbl = Table([[Paragraph(t.upper(), h2)]], colWidths=[180*mm])
+        tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,-1), C_PRIMARY),
+            ('LEFTPADDING', (0,0), (-1,-1), 8),
+            ('TOPPADDING', (0,0), (-1,-1), 4),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+        ]))
+        return tbl
+
+    def _brl(v):
+        try:
+            v = float(v or 0)
+        except Exception:
+            v = 0.0
+        return "R$ " + f"{v:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+
+    def _fmt_qty(q):
+        try:
+            q = float(q or 0)
+        except Exception:
+            q = 0.0
+        return str(int(q)) if q.is_integer() else f"{q:.2f}".replace('.', ',')
+
+    th = ParagraphStyle('o_th', parent=body, textColor=colors.white, fontName='Helvetica-Bold')
+    th_c = ParagraphStyle('o_th_c', parent=th, alignment=1)
+    th_r = ParagraphStyle('o_th_r', parent=th, alignment=2)
+    cell_c = ParagraphStyle('o_cell_c', parent=body, alignment=1)
+    cell_r = ParagraphStyle('o_cell_r', parent=body, alignment=2)
+    col_widths = [96*mm, 18*mm, 30*mm, 36*mm]
+
+    def _tabela_itens(label, itens):
+        data = [[Paragraph(label, th), Paragraph('Qtd', th_c), Paragraph('Valor Unit.', th_r), Paragraph('Total', th_r)]]
+        subtotal = 0.0
+        for it in itens:
+            qty = float(it.get('quantity') or 0)
+            unit = float(it.get('unitPrice') or 0)
+            tot = qty * unit
+            subtotal += tot
+            desc = str(it.get('description') or it.get('code') or '—')
+            desc = desc.split('||')[0].split('\n')[0].split('|')[0].strip() or (it.get('code') or '—')
+            if len(desc) > 110:
+                desc = desc[:107] + '...'
+            data.append([
+                Paragraph(desc, body),
+                Paragraph(_fmt_qty(qty), cell_c),
+                Paragraph(_brl(unit), cell_r),
+                Paragraph(_brl(tot), cell_r),
+            ])
+        t = Table(data, colWidths=col_widths, repeatRows=1)
+        st = [
+            ('BACKGROUND', (0,0), (-1,0), C_PRIMARY),
+            ('GRID', (0,0), (-1,-1), 0.4, C_BORDER),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+            ('TOPPADDING', (0,0), (-1,-1), 4),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+            ('LEFTPADDING', (0,0), (-1,-1), 5),
+            ('RIGHTPADDING', (0,0), (-1,-1), 5),
+        ]
+        for i in range(2, len(data), 2):
+            st.append(('BACKGROUND', (0,i), (-1,i), C_LIGHT))
+        t.setStyle(TableStyle(st))
+        return t, subtotal
+
+    q_services = osq.get('services') or []
+    q_parts = osq.get('parts') or []
+    out = []
+    if page_break:
+        out.append(PageBreak())
+    out.append(secao(titulo))
+    out.append(Spacer(1, 6))
+
+    info_bits = []
+    if osq.get('osNumber'):
+        info_bits.append(f"<b>OS Nº:</b> {osq.get('osNumber')}")
+    if osq.get('clientName'):
+        doc_str = f" — {osq.get('clientDoc')}" if osq.get('clientDoc') else ""
+        info_bits.append(f"<b>Cliente:</b> {osq.get('clientName')}{doc_str}")
+    if osq.get('paymentTerm'):
+        info_bits.append(f"<b>Pagamento:</b> {osq.get('paymentTerm')}")
+    if osq.get('category'):
+        info_bits.append(f"<b>Categoria:</b> {osq.get('category')}")
+    if info_bits:
+        out.append(Paragraph("<br/>".join(info_bits), body))
+        out.append(Spacer(1, 8))
+
+    total_geral = 0.0
+    if q_services:
+        t, sub = _tabela_itens('Serviços', q_services)
+        total_geral += sub
+        out.append(t)
+        out.append(Spacer(1, 8))
+    if q_parts:
+        t, sub = _tabela_itens('Peças', q_parts)
+        total_geral += sub
+        out.append(t)
+        out.append(Spacer(1, 8))
+
+    tot_tbl = Table([[Paragraph('<b>TOTAL GERAL</b>', th_r), Paragraph(f"<b>{_brl(total_geral)}</b>", th_r)]],
+                    colWidths=[144*mm, 36*mm])
+    tot_tbl.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), C_DARK),
+        ('TOPPADDING', (0,0), (-1,-1), 6),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+        ('RIGHTPADDING', (0,0), (-1,-1), 8),
+    ]))
+    out.append(tot_tbl)
+    out.append(Spacer(1, 6))
+    out.append(Paragraph("Documento gerado automaticamente pelo Biodron Smart Report. Valores sujeitos a confirmação.", small))
+    return out
+
+
+def _gerar_pdf_orcamento(payload):
+    """PDF de ORÇAMENTO standalone — usado no fluxo de garantia NEGADA, em que o
+    laudo (parecer da negativa) e o orçamento pago seguem em documentos SEPARADOS."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
+    from reportlab.lib.utils import ImageReader
+
+    C_DARK = colors.HexColor('#1e293b')
+    C_MUTED = colors.HexColor('#6b7280')
+    C_BORDER = colors.HexColor('#d1d5db')
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=15*mm, rightMargin=15*mm, topMargin=16*mm, bottomMargin=16*mm, title="Orçamento - Biodron")
+    story = []
+    styles = getSampleStyleSheet()
+    body = ParagraphStyle('orc_body', parent=styles['BodyText'], fontSize=9, leading=12, textColor=C_DARK)
+    small = ParagraphStyle('orc_small', parent=body, fontSize=8, textColor=C_MUTED)
+    h1 = ParagraphStyle('orc_h1', parent=styles['Heading1'], fontSize=15, spaceAfter=2, textColor=C_DARK)
+
+    def _on_page(canvas, doc_):
+        canvas.saveState()
+        canvas.setStrokeColor(C_BORDER)
+        canvas.setLineWidth(0.5)
+        canvas.line(15*mm, 12*mm, 195*mm, 12*mm)
+        canvas.setFont('Helvetica', 7)
+        canvas.setFillColor(C_MUTED)
+        canvas.drawString(15*mm, 8*mm, "Laboratório BioDron · Soluções Tecnológicas")
+        canvas.drawRightString(195*mm, 8*mm, f"Página {doc_.page}")
+        canvas.restoreState()
+
+    logo = payload.get('logo')
+    logo_img = None
+    if logo:
+        try:
+            raw = logo.split(',', 1)[1] if ',' in logo else logo
+            bio = io.BytesIO(base64.b64decode(raw))
+            ir = ImageReader(bio)
+            iw, ih = ir.getSize()
+            ratio = min(130.0/iw, 55.0/ih)
+            bio.seek(0)
+            logo_img = Image(bio, width=iw*ratio, height=ih*ratio)
+        except Exception:
+            logo_img = None
+    head_left = logo_img or Paragraph("<b>BioDron</b>", h1)
+    head_right = Paragraph("<b>ORÇAMENTO DE SERVIÇOS</b>", ParagraphStyle('orc_t', parent=h1, alignment=2, fontSize=13))
+    htbl = Table([[head_left, head_right]], colWidths=[90*mm, 90*mm])
+    htbl.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'MIDDLE'), ('ALIGN', (1,0), (1,0), 'RIGHT')]))
+    story.append(htbl)
+    story.append(Spacer(1, 6))
+    story.append(Paragraph("Referente à análise de garantia (parecer técnico em laudo separado). Orçamento dos serviços/peças para sua avaliação e autorização da manutenção.", small))
+    story.append(Spacer(1, 8))
+
+    osq = payload.get('osQuote') or {}
+    story += _orcamento_story(osq, page_break=False, titulo="Orçamento de Serviços e Peças")
+    doc.build(story, onFirstPage=_on_page, onLaterPages=_on_page)
+    return buf.getvalue()
 
 
 def _gerar_pdf_laudo(payload):
@@ -3249,106 +3444,12 @@ def _gerar_pdf_laudo(payload):
         story.append(sig_table)
 
     # ---- Página de OS / Orçamento (serviços + peças com valores) ----
+    # Garantia: APROVADA → laudo SEM orçamento; NEGADA → orçamento vai em PDF SEPARADO
+    # (gerado por _gerar_pdf_orcamento). Só a via AVULSA embute o orçamento no laudo.
     osq = payload.get('osQuote') or {}
-    q_services = osq.get('services') or []
-    q_parts = osq.get('parts') or []
-    if q_services or q_parts:
-        def _brl(v):
-            try:
-                v = float(v or 0)
-            except Exception:
-                v = 0.0
-            return "R$ " + f"{v:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
-
-        def _fmt_qty(q):
-            try:
-                q = float(q or 0)
-            except Exception:
-                q = 0.0
-            return str(int(q)) if q.is_integer() else f"{q:.2f}".replace('.', ',')
-
-        th = ParagraphStyle('th', parent=body, textColor=colors.white, fontName='Helvetica-Bold')
-        th_c = ParagraphStyle('th_c', parent=th, alignment=1)
-        th_r = ParagraphStyle('th_r', parent=th, alignment=2)
-        cell_c = ParagraphStyle('cell_c', parent=body, alignment=1)
-        cell_r = ParagraphStyle('cell_r', parent=body, alignment=2)
-        col_widths = [96*mm, 18*mm, 30*mm, 36*mm]
-
-        def _tabela_itens(label, itens):
-            data = [[Paragraph(label, th), Paragraph('Qtd', th_c), Paragraph('Valor Unit.', th_r), Paragraph('Total', th_r)]]
-            subtotal = 0.0
-            for it in itens:
-                qty = float(it.get('quantity') or 0)
-                unit = float(it.get('unitPrice') or 0)
-                tot = qty * unit
-                subtotal += tot
-                # Descrição curta: corta o laudo embutido (após '||' / '|' / quebra de linha) e limita tamanho.
-                desc = str(it.get('description') or it.get('code') or '—')
-                desc = desc.split('||')[0].split('\n')[0].split('|')[0].strip() or (it.get('code') or '—')
-                if len(desc) > 110:
-                    desc = desc[:107] + '...'
-                data.append([
-                    Paragraph(desc, body),
-                    Paragraph(_fmt_qty(qty), cell_c),
-                    Paragraph(_brl(unit), cell_r),
-                    Paragraph(_brl(tot), cell_r),
-                ])
-            t = Table(data, colWidths=col_widths, repeatRows=1)
-            st = [
-                ('BACKGROUND', (0,0), (-1,0), C_PRIMARY),
-                ('GRID', (0,0), (-1,-1), 0.4, C_BORDER),
-                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-                ('TOPPADDING', (0,0), (-1,-1), 4),
-                ('BOTTOMPADDING', (0,0), (-1,-1), 4),
-                ('LEFTPADDING', (0,0), (-1,-1), 5),
-                ('RIGHTPADDING', (0,0), (-1,-1), 5),
-            ]
-            for i in range(2, len(data), 2):
-                st.append(('BACKGROUND', (0,i), (-1,i), C_LIGHT))
-            t.setStyle(TableStyle(st))
-            return t, subtotal
-
-        story.append(PageBreak())
-        story.append(secao("Ordem de Serviço / Orçamento"))
-        story.append(Spacer(1, 6))
-
-        info_bits = []
-        if osq.get('osNumber'):
-            info_bits.append(f"<b>OS Nº:</b> {osq.get('osNumber')}")
-        if osq.get('clientName'):
-            doc_str = f" — {osq.get('clientDoc')}" if osq.get('clientDoc') else ""
-            info_bits.append(f"<b>Cliente:</b> {osq.get('clientName')}{doc_str}")
-        if osq.get('paymentTerm'):
-            info_bits.append(f"<b>Pagamento:</b> {osq.get('paymentTerm')}")
-        if osq.get('category'):
-            info_bits.append(f"<b>Categoria:</b> {osq.get('category')}")
-        if info_bits:
-            story.append(Paragraph("<br/>".join(info_bits), body))
-            story.append(Spacer(1, 8))
-
-        total_geral = 0.0
-        if q_services:
-            t, sub = _tabela_itens('Serviços', q_services)
-            total_geral += sub
-            story.append(t)
-            story.append(Spacer(1, 8))
-        if q_parts:
-            t, sub = _tabela_itens('Peças', q_parts)
-            total_geral += sub
-            story.append(t)
-            story.append(Spacer(1, 8))
-
-        tot_tbl = Table([[Paragraph('<b>TOTAL GERAL</b>', th_r), Paragraph(f"<b>{_brl(total_geral)}</b>", th_r)]],
-                        colWidths=[144*mm, 36*mm])
-        tot_tbl.setStyle(TableStyle([
-            ('BACKGROUND', (0,0), (-1,-1), C_DARK),
-            ('TOPPADDING', (0,0), (-1,-1), 6),
-            ('BOTTOMPADDING', (0,0), (-1,-1), 6),
-            ('RIGHTPADDING', (0,0), (-1,-1), 8),
-        ]))
-        story.append(tot_tbl)
-        story.append(Spacer(1, 6))
-        story.append(Paragraph("Documento gerado automaticamente pelo Biodron Smart Report. Valores sujeitos a confirmação.", small))
+    garantia_status = (header_data.get('garantiaStatus') or 'avulsa')
+    if (osq.get('services') or osq.get('parts')) and garantia_status == 'avulsa':
+        story += _orcamento_story(osq)
 
     doc.build(story, onFirstPage=_on_page, onLaterPages=_on_page)
     return buf.getvalue()
@@ -3361,12 +3462,15 @@ def gerar_pdf_download():
     if err:
         return err
     payload = request.json or {}
+    hd = payload.get('headerData') or {}
+    garantia = (hd.get('garantiaStatus') or 'avulsa')
+    osq = payload.get('osQuote') or {}
+    tem_orcamento = bool(osq.get('services') or osq.get('parts'))
     try:
         pdf_bytes = _gerar_pdf_laudo(payload)
     except Exception as e:
         return jsonify({"error": f"Falha ao gerar PDF: {e}"}), 500
     # Arquiva automaticamente o laudo no disco do servidor
-    hd = payload.get('headerData') or {}
     cli_field = next((f for f in (payload.get('headerConfig') or []) if f.get('id') == 'client'), None)
     _arquivar_pdf_laudo(full_data, pdf_bytes, {
         "cliente": (hd.get(cli_field['id']) if cli_field else '') or '',
@@ -3375,9 +3479,24 @@ def gerar_pdf_download():
         "laudoId": hd.get('laudoId') or '',
     })
     save_data(full_data)
-    filename = payload.get('filename') or 'laudo.pdf'
+    base = (payload.get('filename') or 'laudo.pdf')
+    if base.lower().endswith('.pdf'):
+        base = base[:-4]
+    # Garantia NEGADA com orçamento → 2 documentos separados num ZIP (laudo + orçamento)
+    if garantia == 'garantia_negada' and tem_orcamento:
+        try:
+            orc_bytes = _gerar_pdf_orcamento(payload)
+        except Exception as e:
+            return jsonify({"error": f"Falha ao gerar orçamento: {e}"}), 500
+        sufixo = base[6:] if base.startswith('laudo_') else base
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(f"{base}.pdf", pdf_bytes)
+            zf.writestr(f"orcamento_{sufixo}.pdf", orc_bytes)
+        return Response(zip_buf.getvalue(), mimetype='application/zip',
+                        headers={'Content-Disposition': f'attachment; filename="garantia_{sufixo}.zip"'})
     return Response(pdf_bytes, mimetype='application/pdf',
-                    headers={'Content-Disposition': f'attachment; filename="{filename}"'})
+                    headers={'Content-Disposition': f'attachment; filename="{base}.pdf"'})
 
 
 @app.route('/api/os/<os_id>/gerar-pdf-anexar', methods=['POST'])
@@ -3405,6 +3524,11 @@ def os_gerar_pdf_anexar(os_id):
             "paymentTerm": "À vista",
             "category": CATEGORIA_PEDIDO_VENDA_PADRAO,
         }
+    # Garantia: propaga o status do draft pro gerador do PDF (controla a página de orçamento).
+    garantia = draft.get('garantiaStatus') or ((payload.get('headerData') or {}).get('garantiaStatus')) or 'avulsa'
+    payload.setdefault('headerData', {})
+    payload['headerData']['garantiaStatus'] = garantia
+
     try:
         pdf_bytes = _gerar_pdf_laudo(payload)
     except Exception as e:
@@ -3420,39 +3544,48 @@ def os_gerar_pdf_anexar(os_id):
         "crmOpNum": draft.get('crmOpNum') or '',
     })
 
-    filename = f"laudo_OS_{draft.get('omieOsNumber') or os_id}.pdf"
-
-    # Zipa e anexa no Omie
-    zip_buf = io.BytesIO()
-    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(filename, pdf_bytes)
-    zip_content = zip_buf.getvalue()
-    zip_b64 = base64.b64encode(zip_content).decode('utf-8')
-    md5_hash = hashlib.md5(zip_b64.encode('ascii')).hexdigest()
-
-    cod_int = f"anx_{os_id}_{int(datetime.utcnow().timestamp())}"[:20]
-    try:
-        omie_call('/geral/anexo/', 'IncluirAnexo', {
-            "cCodIntAnexo": cod_int,
-            "cTabela": "ordem-servico",
-            "nId": draft['omieOsId'],
-            "cNomeArquivo": filename,
-            "cTipoArquivo": "pdf",
-            "cArquivo": zip_b64,
-            "cMd5": md5_hash
-        })
-        draft['pdfAnexado'] = True
-        draft['pdfAnexadoAt'] = datetime.utcnow().isoformat() + "Z"
-    except OmieError as e:
-        return jsonify({"error": str(e)}), e.status
-
-    # Se a OS veio de uma oportunidade do CRM, anexa o mesmo laudo NA OPORTUNIDADE também.
-    if draft.get('crmOpId'):
+    osnum = draft.get('omieOsNumber') or os_id
+    # Documentos a anexar: laudo sempre; na garantia NEGADA, também o orçamento (PDF separado).
+    docs = [(f"laudo_OS_{osnum}.pdf", pdf_bytes)]
+    if garantia == 'garantia_negada' and (draft.get('services') or draft.get('parts')):
         try:
-            _incluir_anexo_omie('crm-oportunidades', draft['crmOpId'], filename, 'pdf', zip_b64, md5_hash, 'opx')
-            draft['pdfAnexadoOp'] = True
+            docs.append((f"orcamento_OS_{osnum}.pdf", _gerar_pdf_orcamento(payload)))
+        except Exception as e:
+            draft['orcamentoWarning'] = f"Falha ao gerar orçamento: {e}"
+
+    def _zip64(fn, by):
+        zb = io.BytesIO()
+        with zipfile.ZipFile(zb, 'w', zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(fn, by)
+        b64 = base64.b64encode(zb.getvalue()).decode('utf-8')
+        return b64, hashlib.md5(b64.encode('ascii')).hexdigest()
+
+    # Anexa cada documento na OS (e na oportunidade do CRM, se houver).
+    for fn, by in docs:
+        b64, md5h = _zip64(fn, by)
+        cod_int = ("ax" + secrets.token_hex(8))[:20]
+        try:
+            omie_call('/geral/anexo/', 'IncluirAnexo', {
+                "cCodIntAnexo": cod_int,
+                "cTabela": "ordem-servico",
+                "nId": draft['omieOsId'],
+                "cNomeArquivo": fn,
+                "cTipoArquivo": "pdf",
+                "cArquivo": b64,
+                "cMd5": md5h
+            })
         except OmieError as e:
-            draft['crmAnexoWarning'] = f"PDF anexado na OS, mas falhou na oportunidade: {e}"
+            return jsonify({"error": str(e)}), e.status
+        if draft.get('crmOpId'):
+            try:
+                _incluir_anexo_omie('crm-oportunidades', draft['crmOpId'], fn, 'pdf', b64, md5h, 'op' + secrets.token_hex(2))
+            except OmieError as e:
+                draft['crmAnexoWarning'] = f"PDF anexado na OS, mas falhou na oportunidade: {e}"
+
+    draft['pdfAnexado'] = True
+    draft['pdfAnexadoAt'] = datetime.utcnow().isoformat() + "Z"
+    if draft.get('crmOpId'):
+        draft['pdfAnexadoOp'] = True
 
     save_data(full_data)
     return jsonify({"success": True})
@@ -3783,8 +3916,15 @@ def os_send(os_id):
         if not p.get('omieProductId'):
             return jsonify({"error": f"Peça '{p.get('description','')}' não está vinculada ao catálogo Omie."}), 400
 
+    # Garantia APROVADA: a OS é de garantia (valor ZERO, sem cobrança) e NÃO gera Pedido de Venda.
+    garantia_status = (draft.get('garantiaStatus') or 'avulsa')
+    garantia_aprovada = (garantia_status == 'garantia_aprovada')
+
     # Observações puras (sem mais "Peças utilizadas:" embutido — agora vão pro produtosUtilizados)
     obs_combinada = (draft.get('observations') or '').strip()
+    if garantia_aprovada and 'GARANTIA' not in obs_combinada.upper():
+        nota_gar = "ATENDIMENTO EM GARANTIA — reparo sem custo ao cliente (valores zerados)."
+        obs_combinada = (nota_gar + ("\n\n" + obs_combinada if obs_combinada else "")).strip()
     # Referência cruzada: se a OS veio de uma oportunidade do CRM, registra o nº dela.
     if draft.get('crmOpNum') and 'Oportunidade CRM' not in obs_combinada:
         ref_op = f"Ref. Oportunidade CRM nº {draft['crmOpNum']}"
@@ -3797,7 +3937,8 @@ def os_send(os_id):
         if sid is None:
             return jsonify({"error": f"Serviço '{s.get('description','')}' não está vinculado ao catálogo Omie."}), 400
         qty = float(s.get('quantity') or 1)
-        price = float(s.get('unitPrice') or 0)
+        # Garantia aprovada: zera o valor do serviço (OS sem cobrança).
+        price = 0.0 if garantia_aprovada else float(s.get('unitPrice') or 0)
         desc = s.get('description') or ''
         # No primeiro serviço, anexa observações como parte da descrição detalhada do serviço
         if idx == 0 and obs_combinada:
@@ -3903,8 +4044,9 @@ def os_send(os_id):
         return jsonify({"error": str(e)}), e.status
 
     # Cria/atualiza o Pedido de Venda das peças (preço + à vista + categoria).
+    # Garantia APROVADA não gera Pedido de Venda (peças trocadas sob garantia, sem cobrança).
     draft['pedidoVendaError'] = None
-    if parts_validas:
+    if parts_validas and not garantia_aprovada:
         try:
             _criar_ou_atualizar_pedido_venda(draft, parts_validas, draft.get('nCodCCFromOmie') or nCodCC)
         except OmieError as e:
@@ -4502,7 +4644,9 @@ HTML_PAGE = """
                     laudoId: laudoId || null,
                     crmOpId: headerData.crmOpId || null,
                     crmOpNum: headerData.crmOpNum || null,
-                    crmFaseCodigo: headerData.crmFaseCodigo || null
+                    crmFaseCodigo: headerData.crmFaseCodigo || null,
+                    garantiaStatus: headerData.garantiaStatus || 'avulsa',
+                    garantiaMotivo: headerData.garantiaMotivo || ''
                 });
             };
 
@@ -5230,13 +5374,21 @@ HTML_PAGE = """
                         alert('Erro ao gerar PDF: ' + t.substring(0, 200));
                         return;
                     }
+                    // Garantia negada vem como ZIP (laudo + orçamento) — respeita o nome do servidor.
+                    let dlName = filename;
+                    const cd = resp.headers.get('Content-Disposition') || '';
+                    const m = cd.match(/filename="?([^"]+)"?/);
+                    if (m && m[1]) dlName = m[1];
                     const blob = await resp.blob();
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = filename;
+                    a.download = dlName;
                     a.click();
                     URL.revokeObjectURL(url);
+                    if (dlName.toLowerCase().endsWith('.zip')) {
+                        alert('Garantia negada: baixado um ZIP com 2 PDFs — o laudo da negativa e o orçamento separado.');
+                    }
                 } catch (err) {
                     alert('Erro: ' + (err.message || err));
                 }
@@ -6697,6 +6849,19 @@ HTML_PAGE = """
                                 <div className="bg-blue-50 border border-blue-200 p-3 rounded-lg text-sm text-blue-800 flex items-center gap-2">
                                     <i className="ph-fill ph-link"></i>
                                     <span>Esta OS foi gerada a partir do laudo de <b>${currentOs.fromLaudo.client || 'cliente'}</b> ${currentOs.fromLaudo.model ? `— ${currentOs.fromLaudo.model}` : ''}</span>
+                                </div>
+                            `}
+
+                            ${currentOs.garantiaStatus === 'garantia_aprovada' && html`
+                                <div className="bg-emerald-50 border border-emerald-300 p-3 rounded-lg text-sm text-emerald-800 flex items-start gap-2">
+                                    <i className="ph-fill ph-shield-check text-lg mt-0.5"></i>
+                                    <span><b>Garantia APROVADA.</b> Ao enviar, esta OS vai pro Omie com <b>valor ZERO</b> (sem cobrança) e <b>sem Pedido de Venda</b>. O PDF do laudo não inclui orçamento.</span>
+                                </div>
+                            `}
+                            ${currentOs.garantiaStatus === 'garantia_negada' && html`
+                                <div className="bg-red-50 border border-red-300 p-3 rounded-lg text-sm text-red-800 flex items-start gap-2">
+                                    <i className="ph-fill ph-shield-warning text-lg mt-0.5"></i>
+                                    <span><b>Garantia NEGADA.</b> Reparo segue como serviço pago. Ao anexar/baixar, saem <b>2 documentos separados</b>: o laudo da negativa e o orçamento.${currentOs.garantiaMotivo ? html` Motivo: <i>${currentOs.garantiaMotivo}</i>` : ''}</span>
                                 </div>
                             `}
 
