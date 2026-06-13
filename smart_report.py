@@ -616,9 +616,17 @@ def update_data():
 
     role = full_data['users'][user]['role']
 
-    # O Usuário atualiza apenas o PRÓPRIO estado de laudo
+    # O Usuário atualiza apenas o PRÓPRIO estado de laudo.
+    # MERGE (não overwrite!): o autosave do laudo envia só as chaves do laudo
+    # (headerData, answers, etc) e NÃO envia osDrafts. Sobrescrever o userState inteiro
+    # apagava as Ordens de Serviço do usuário. O merge preserva osDrafts e demais chaves.
     if 'userState' in payload:
-        full_data['userStates'][user] = payload['userState']
+        atual = full_data['userStates'].get(user, {}) or {}
+        novo = payload['userState'] or {}
+        # Nunca deixa o autosave do laudo zerar os osDrafts (gerenciados por endpoints próprios)
+        if 'osDrafts' not in novo:
+            novo = {**novo, 'osDrafts': atual.get('osDrafts', [])}
+        full_data['userStates'][user] = {**atual, **novo}
 
     # Apenas Admin pode atualizar as configurações globais (Modelos, Logo, Cabeçalhos)
     if role == 'admin' and 'globalConfig' in payload:
@@ -945,6 +953,66 @@ def relatorio_gerencial():
     resumo["topServicos"] = sorted([{"desc": k, "qtd": v} for k, v in top_servicos.items()], key=lambda x: -x["qtd"])[:10]
     items.sort(key=lambda x: x.get('data', ''), reverse=True)
     return jsonify({"items": items, "resumo": resumo})
+
+
+@app.route('/api/admin/backups-osdrafts', methods=['GET'])
+def backups_osdrafts():
+    """Inspeciona os backups diários: quantas OS (osDrafts) cada um tem, por usuário.
+    Usado pra recuperar OS perdidas pelo bug de overwrite do userState."""
+    user, full_data, err = _require_admin()
+    if err:
+        return err
+    out = []
+    try:
+        files = sorted([x for x in os.listdir(BACKUP_DIR) if x.startswith('bateria_data_')], reverse=True)
+    except Exception:
+        files = []
+    for fname in files:
+        try:
+            with open(os.path.join(BACKUP_DIR, fname), encoding='utf-8') as f:
+                bdata = json.load(f)
+            por_user = {}
+            total = 0
+            for u, st in (bdata.get('userStates') or {}).items():
+                n = len((st or {}).get('osDrafts') or [])
+                if n:
+                    por_user[u] = n
+                total += n
+            out.append({"arquivo": fname, "totalOsDrafts": total, "porUser": por_user})
+        except Exception as e:
+            out.append({"arquivo": fname, "erro": str(e)})
+    atual = sum(len((st or {}).get('osDrafts') or []) for st in (full_data.get('userStates') or {}).values())
+    return jsonify({"backups": out, "osDraftsAtual": atual})
+
+
+@app.route('/api/admin/restaurar-osdrafts', methods=['POST'])
+def restaurar_osdrafts():
+    """Restaura (mescla) os osDrafts de um backup escolhido, sem sobrescrever os atuais —
+    só adiciona as OS cujos ids não existem hoje."""
+    user, full_data, err = _require_admin()
+    if err:
+        return err
+    fname = (request.json or {}).get('arquivo') or ''
+    if not fname.startswith('bateria_data_') or '/' in fname or '\\' in fname or '..' in fname:
+        return jsonify({"error": "arquivo inválido"}), 400
+    path = os.path.join(BACKUP_DIR, fname)
+    if not os.path.isfile(path):
+        return jsonify({"error": "backup não encontrado"}), 404
+    with open(path, encoding='utf-8') as f:
+        bdata = json.load(f)
+    restaurados = 0
+    for u, st in (bdata.get('userStates') or {}).items():
+        drafts_bkp = (st or {}).get('osDrafts') or []
+        if not drafts_bkp:
+            continue
+        full_data.setdefault('userStates', {}).setdefault(u, {})
+        atuais = full_data['userStates'][u].get('osDrafts') or []
+        ids_atuais = {d.get('id') for d in atuais}
+        novos = [d for d in drafts_bkp if d.get('id') not in ids_atuais]
+        full_data['userStates'][u]['osDrafts'] = atuais + novos
+        restaurados += len(novos)
+    save_data(full_data)
+    return jsonify({"success": True, "restaurados": restaurados})
 
 
 @app.route('/api/admin/laudo-arquivado', methods=['GET'])
