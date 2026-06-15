@@ -1611,6 +1611,92 @@ def crm_listar_oportunidades():
     return jsonify({"items": items, "total": len(items)})
 
 
+def _parse_omie_date(s):
+    """Converte data do Omie ('dd/mm/aaaa') em datetime. Retorna None se vazio/inválido."""
+    if not s or not isinstance(s, str):
+        return None
+    s = s.strip()
+    for fmt in ('%d/%m/%Y', '%d/%m/%y'):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+# Campos de data do fasesStatus (nomes padrão do funil Omie). Usados de forma
+# MAPPING-FREE: pegamos a MAIOR data (última transição), sem atribuir a uma fase
+# específica — porque o mapeamento campo↔fase ainda não foi confirmado com dados reais.
+FASES_DATE_FIELDS = ('dNovoLead', 'dQualificacao', 'dShowRoom', 'dTreinamento', 'dProjeto', 'dConclusao')
+# Fase de Aprovação não tem constante própria; é a do meio entre Análise e Preparação.
+CRM_FASE_APROVACAO = 10843780551
+
+
+@app.route('/api/admin/crm-tempo-fases', methods=['GET'])
+def crm_tempo_fases():
+    """Tempo nas fases (dashboard). Métrica INEQUÍVOCA: 'dias parados na fase atual'
+    = hoje − última transição (maior data do fasesStatus). A fase atual vem do nCodFase
+    (confiável). Também devolve as datas brutas pra confirmarmos o mapeamento campo↔fase
+    antes de calcular o histórico tempo-por-fase (que depende desse mapeamento)."""
+    user, full_data, err = _require_admin()
+    if err:
+        return err
+    hoje = datetime.now()
+    fases_alvo = [CRM_FASE_ANALISE, CRM_FASE_APROVACAO, CRM_FASE_PREPARACAO]
+    items = []
+    erro = None
+    for fase in fases_alvo:
+        try:
+            data = omie_call('/crm/oportunidades/', 'ListarOportunidades', {
+                "pagina": 1, "registros_por_pagina": 100, "fase": fase
+            })
+        except OmieNoRecords:
+            continue
+        except OmieError as e:
+            erro = str(e)
+            continue
+        for op in data.get('cadastros', []):
+            ident = op.get('identificacao', {}) or {}
+            fs = op.get('fasesStatus', {}) or {}
+            raw = {}
+            datas = []
+            for f in FASES_DATE_FIELDS:
+                val = fs.get(f)
+                d = _parse_omie_date(val)
+                if d:
+                    datas.append(d)
+                    raw[f] = val
+            entrada = max(datas) if datas else None
+            dias = (hoje - entrada).days if entrada else None
+            items.append({
+                "nCodOp": ident.get('nCodOp'),
+                "cNumOp": ident.get('cNumOp') or '',
+                "descricao": (ident.get('cDesOp') or '')[:90],
+                "faseCodigo": fs.get('nCodFase'),
+                "faseNome": CRM_FASES.get(fs.get('nCodFase'), '—'),
+                "entrada": entrada.strftime('%d/%m/%Y') if entrada else '',
+                "diasNaFase": dias,
+                "datasBrutas": raw,
+            })
+    # Agrega por fase atual (mapping-free).
+    por_fase = {}
+    for it in items:
+        fn = it['faseNome']
+        b = por_fase.setdefault(fn, {"fase": fn, "qtd": 0, "diasTotal": 0, "diasMax": 0, "comData": 0})
+        b["qtd"] += 1
+        if it['diasNaFase'] is not None:
+            b["diasTotal"] += it['diasNaFase']
+            b["comData"] += 1
+            b["diasMax"] = max(b["diasMax"], it['diasNaFase'])
+    resumo = []
+    for fn, v in por_fase.items():
+        media = round(v["diasTotal"] / v["comData"], 1) if v["comData"] else None
+        resumo.append({"fase": fn, "qtd": v["qtd"], "diasMedio": media, "diasMax": v["diasMax"]})
+    resumo.sort(key=lambda x: x["fase"])
+    items.sort(key=lambda x: (x["diasNaFase"] is None, -(x["diasNaFase"] or 0)))
+    return jsonify({"items": items, "resumo": resumo, "erro": erro})
+
+
 @app.route('/api/crm/oportunidade/<n_cod_op>', methods=['GET'])
 def crm_detalhe_oportunidade(n_cod_op):
     """Consulta uma oportunidade e devolve dados prontos pra auto-preencher o laudo:
@@ -4231,6 +4317,8 @@ HTML_PAGE = """
             const [relCli, setRelCli] = useState('');
             const [relEquip, setRelEquip] = useState('');
             const [relTec, setRelTec] = useState('');
+            const [tempoFases, setTempoFases] = useState(null);
+            const [tempoFasesRaw, setTempoFasesRaw] = useState(false); // mostrar datas brutas (conferência do mapeamento)
 
             // DADOS GLOBAIS (Admin dita as regras)
             const [headerConfig, setHeaderConfig] = useState([]);
@@ -4505,8 +4593,14 @@ HTML_PAGE = """
                 fetch('/api/admin/relatorio?' + qs.toString(), { headers: { 'Authorization': auth.token } })
                     .then(r => r.json()).then(setRelatorio).catch(() => setRelatorio(null));
             };
+            const fetchTempoFases = () => {
+                setTempoFases('loading');
+                fetch('/api/admin/crm-tempo-fases', { headers: { 'Authorization': auth.token } })
+                    .then(r => r.json()).then(setTempoFases).catch(() => setTempoFases(null));
+            };
             useEffect(() => {
                 if (auth && auth.role === 'admin' && activeTab === 'relatorios' && relatorio === null) fetchRelatorio();
+                if (auth && auth.role === 'admin' && activeTab === 'relatorios' && tempoFases === null) fetchTempoFases();
             }, [activeTab, auth]);
             const exportRelatorioCSV = () => {
                 if (!relatorio || !relatorio.items) return;
@@ -6225,7 +6319,7 @@ HTML_PAGE = """
                         <div className="bg-white p-4 rounded-xl border border-slate-200 flex flex-col md:flex-row md:items-end gap-3 justify-between">
                             <div>
                                 <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2"><i className="ph-fill ph-chart-bar text-teal-600 text-2xl"></i> Relatórios Gerenciais</h2>
-                                <p className="text-sm text-slate-500 mt-1">Peças, serviços, técnico e valores das OS da filial. (Tempo nas fases do CRM: em breve.)</p>
+                                <p className="text-sm text-slate-500 mt-1">Peças, serviços, técnico e valores das OS da filial, e tempo nas fases do CRM.</p>
                             </div>
                             <div className="flex gap-2 flex-wrap items-end">
                                 <div><label className="block text-xs text-slate-500">De</label><input type="date" value=${relDe} onChange=${e => setRelDe(e.target.value)} className="p-2 border border-slate-300 rounded text-sm" /></div>
@@ -6293,6 +6387,47 @@ HTML_PAGE = """
                                 </div>
                             </div>
                         `}
+
+                        ${''/* ---- Tempo nas fases (CRM) ---- */}
+                        <div className="bg-white p-5 rounded-xl border border-slate-200">
+                            <div className="flex justify-between items-center mb-1 flex-wrap gap-2">
+                                <h3 className="font-semibold text-slate-700 flex items-center gap-2"><i className="ph-fill ph-hourglass-medium text-amber-600"></i> Tempo nas fases (oportunidades abertas)</h3>
+                                <button onClick=${fetchTempoFases} className="bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded text-sm font-medium"><i className="ph-bold ph-arrows-clockwise"></i> Atualizar</button>
+                            </div>
+                            <p className="text-xs text-slate-400 mb-3">Dias parados na fase atual = hoje − última transição (maior data do fasesStatus). Métrica direta, não depende de mapear cada data a uma fase.</p>
+                            ${tempoFases === 'loading' && html`<div className="text-center py-6 text-slate-500"><i className="ph ph-spinner animate-spin text-2xl"></i></div>`}
+                            ${tempoFases && tempoFases !== 'loading' && tempoFases.error && html`<div className="text-sm text-red-600">Erro: ${tempoFases.error}</div>`}
+                            ${tempoFases && tempoFases !== 'loading' && tempoFases.resumo && html`
+                                ${tempoFases.erro ? html`<div className="text-xs text-amber-600 mb-2">⚠️ ${tempoFases.erro}</div>` : ''}
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+                                    ${tempoFases.resumo.map(s => html`
+                                        <div key=${s.fase} className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                                            <div className="text-xs text-slate-500 uppercase truncate">${s.fase}</div>
+                                            <div className="text-2xl font-bold text-amber-700">${s.diasMedio !== null ? s.diasMedio + ' dias' : '—'}</div>
+                                            <div className="text-xs text-slate-400">${s.qtd} aberta(s) · máx ${s.diasMax} dias</div>
+                                        </div>
+                                    `)}
+                                </div>
+                                <div className="flex justify-end mb-2">
+                                    <button onClick=${() => setTempoFasesRaw(!tempoFasesRaw)} className="text-xs text-slate-500 hover:text-slate-700 underline">${tempoFasesRaw ? 'ocultar' : 'mostrar'} datas brutas (conferir mapeamento)</button>
+                                </div>
+                                <div className="overflow-x-auto rounded border border-slate-200 max-h-[400px] overflow-y-auto">
+                                    <table className="min-w-full text-sm">
+                                        <thead className="bg-slate-100 text-slate-700 sticky top-0"><tr><th className="p-2 text-left">Nº</th><th className="p-2 text-left">Descrição</th><th className="p-2 text-left">Fase atual</th><th className="p-2 text-left">Entrada</th><th className="p-2 text-right">Dias</th>${tempoFasesRaw ? html`<th className="p-2 text-left">Datas brutas (fasesStatus)</th>` : ''}</tr></thead>
+                                        <tbody className="divide-y divide-slate-100">
+                                            ${(tempoFases.items || []).length === 0 ? html`<tr><td colSpan=${tempoFasesRaw ? 6 : 5} className="p-3 text-center text-slate-400">Nenhuma oportunidade aberta nas fases monitoradas.</td></tr>` : tempoFases.items.map(it => html`<tr key=${it.nCodOp} className="hover:bg-slate-50">
+                                                <td className="p-2 text-xs font-mono whitespace-nowrap">${it.cNumOp || '—'}</td>
+                                                <td className="p-2 text-xs max-w-xs truncate" title=${it.descricao}>${it.descricao || '—'}</td>
+                                                <td className="p-2 text-xs">${it.faseNome}</td>
+                                                <td className="p-2 text-xs whitespace-nowrap">${it.entrada || '—'}</td>
+                                                <td className=${'p-2 text-xs text-right font-bold ' + (it.diasNaFase >= 15 ? 'text-red-600' : (it.diasNaFase >= 7 ? 'text-amber-600' : 'text-slate-700'))}>${it.diasNaFase !== null ? it.diasNaFase : '—'}</td>
+                                                ${tempoFasesRaw ? html`<td className="p-2 text-[10px] text-slate-400 font-mono">${Object.keys(it.datasBrutas || {}).length ? Object.entries(it.datasBrutas).map(([k, v]) => `${k}=${v}`).join('  ') : '—'}</td>` : ''}
+                                            </tr>`)}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            `}
+                        </div>
                     </div>
                 `;
             };
