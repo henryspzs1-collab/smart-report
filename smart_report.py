@@ -121,7 +121,8 @@ def public_user_view(username: str, user: dict) -> dict:
         "phone": user.get("phone", ""),
         "mustResetPassword": user.get("mustResetPassword", False),
         "createdAt": user.get("createdAt", ""),
-        "filialId": user.get("filialId", "matriz")
+        "filialId": user.get("filialId", "matriz"),
+        "filialIds": user.get("filialIds") or [user.get("filialId", "matriz")]
     }
 
 
@@ -421,10 +422,17 @@ def load_data():
             }
         }
         changed = True
-    # Garante que todo usuário tem filialId (default: matriz)
+    # Garante que todo usuário tem filialId (filial ATIVA) e filialIds (filiais que pode acessar).
     for uname, u in data.get("users", {}).items():
         if "filialId" not in u:
             u["filialId"] = "matriz"
+            changed = True
+        if "filialIds" not in u or not isinstance(u.get("filialIds"), list) or not u["filialIds"]:
+            u["filialIds"] = [u["filialId"]]
+            changed = True
+        # A filial ativa precisa estar entre as filiais permitidas.
+        if u["filialId"] not in u["filialIds"]:
+            u["filialId"] = u["filialIds"][0]
             changed = True
 
     # Segurança: desativa o admin padrão se ainda estiver com a senha "admin" (uma vez só).
@@ -453,6 +461,34 @@ def save_data(data):
         os.fsync(f.fileno())
     os.replace(tmp, DATA_FILE)
     _backup_daily(data)
+
+
+def _sanitize_filial_ids(full_data, ids, fallback='matriz'):
+    """Valida uma lista de filiais contra as cadastradas. Mantém só as existentes,
+    sem duplicatas e na ordem recebida. Garante ao menos uma (fallback)."""
+    filiais = full_data.get('filiais') or {}
+    out = []
+    for fid in (ids or []):
+        fid = (str(fid) if fid is not None else '').strip()
+        if fid and fid in filiais and fid not in out:
+            out.append(fid)
+    if not out:
+        out = [fallback if fallback in filiais else (next(iter(filiais), 'matriz'))]
+    return out
+
+
+def _filiais_nomes(full_data, ids):
+    """[{id, nome}] das filiais informadas, na ordem (pra rótulos do seletor)."""
+    filiais = full_data.get('filiais') or {}
+    return [{"id": fid, "nome": (filiais.get(fid) or {}).get('nome') or fid} for fid in (ids or [])]
+
+
+@app.route('/api/filiais-publicas', methods=['GET'])
+def filiais_publicas():
+    """Lista pública (sem segredos Omie) das filiais — para o seletor no auto-cadastro."""
+    full_data = load_data()
+    filiais = full_data.get('filiais') or {}
+    return jsonify([{"id": fid, "nome": (f or {}).get('nome') or fid} for fid, f in filiais.items()])
 
 
 @app.route('/api/login', methods=['POST'])
@@ -486,7 +522,10 @@ def login():
         "role": user['role'],
         "firstName": user.get('firstName', ''),
         "lastName": user.get('lastName', ''),
-        "mustResetPassword": user.get('mustResetPassword', False)
+        "mustResetPassword": user.get('mustResetPassword', False),
+        "filialId": user.get('filialId', 'matriz'),
+        "filialIds": user.get('filialIds') or [user.get('filialId', 'matriz')],
+        "filiais": _filiais_nomes(full_data, user.get('filialIds') or [user.get('filialId', 'matriz')])
     })
 
 
@@ -540,6 +579,8 @@ def register():
         if u.get('email', '').lower() == email and email:
             return jsonify({"success": False, "message": "Esse e-mail já está cadastrado."}), 400
 
+    # Filiais escolhidas pelo usuário no cadastro (admin pode ajustar na aprovação).
+    filiais_user = _sanitize_filial_ids(full_data, data_in.get('filialIds') or ([data_in.get('filialId')] if data_in.get('filialId') else []))
     full_data['users'][username] = {
         "passwordHash": hash_password(password),
         "role": "user",
@@ -549,7 +590,9 @@ def register():
         "email": email,
         "phone": phone,
         "mustResetPassword": False,
-        "createdAt": datetime.utcnow().isoformat() + "Z"
+        "createdAt": datetime.utcnow().isoformat() + "Z",
+        "filialIds": filiais_user,
+        "filialId": filiais_user[0]
     }
     save_data(full_data)
     return jsonify({"success": True, "message": "Conta criada! Aguarde a aprovação do administrador."})
@@ -674,7 +717,7 @@ def manage_users():
         last = (body.get('lastName') or '').strip()
         email = (body.get('email') or '').strip().lower()
         phone = (body.get('phone') or '').strip()
-        filial_id = (body.get('filialId') or 'matriz').strip()
+        filiais_user = _sanitize_filial_ids(full_data, body.get('filialIds') or ([body.get('filialId')] if body.get('filialId') else []))
 
         if not new_user or not new_pass:
             return jsonify({"error": "Preencha usuário e senha"}), 400
@@ -693,7 +736,8 @@ def manage_users():
             "phone": phone,
             "mustResetPassword": False,
             "createdAt": datetime.utcnow().isoformat() + "Z",
-            "filialId": filial_id
+            "filialIds": filiais_user,
+            "filialId": filiais_user[0]
         }
         save_data(full_data)
         return jsonify({"success": True})
@@ -719,7 +763,18 @@ def approve_user(username):
         return err
     if username not in full_data['users']:
         return jsonify({"error": "Usuário não encontrado"}), 404
+    body = request.json or {}
     full_data['users'][username]['status'] = 'active'
+    # Permite definir o papel (usuário comum / admin) já no momento da aprovação.
+    new_role = body.get('role')
+    if new_role in ('user', 'admin'):
+        full_data['users'][username]['role'] = new_role
+    # Permite ajustar as filiais do usuário na aprovação (se o admin enviar).
+    if body.get('filialIds') is not None:
+        ids = _sanitize_filial_ids(full_data, body.get('filialIds'))
+        full_data['users'][username]['filialIds'] = ids
+        if full_data['users'][username].get('filialId') not in ids:
+            full_data['users'][username]['filialId'] = ids[0]
     save_data(full_data)
     return jsonify({"success": True})
 
@@ -1144,12 +1199,42 @@ def change_filial(username):
         return err
     if username not in full_data['users']:
         return jsonify({"error": "Usuário não encontrado"}), 404
-    fid = (request.json or {}).get('filialId')
-    if fid not in (full_data.get('filiais') or {}):
-        return jsonify({"error": "Filial inválida"}), 400
-    full_data['users'][username]['filialId'] = fid
+    body = request.json or {}
+    # Aceita lista (filialIds — filiais que o usuário pode acessar) ou um único filialId (legado).
+    if body.get('filialIds') is not None:
+        ids = _sanitize_filial_ids(full_data, body.get('filialIds'))
+        full_data['users'][username]['filialIds'] = ids
+        if full_data['users'][username].get('filialId') not in ids:
+            full_data['users'][username]['filialId'] = ids[0]
+    else:
+        fid = body.get('filialId')
+        if fid not in (full_data.get('filiais') or {}):
+            return jsonify({"error": "Filial inválida"}), 400
+        full_data['users'][username]['filialId'] = fid
+        ids = full_data['users'][username].get('filialIds') or []
+        if fid not in ids:
+            full_data['users'][username]['filialIds'] = ids + [fid]
     save_data(full_data)
     return jsonify({"success": True})
+
+
+@app.route('/api/me/filial-ativa', methods=['POST'])
+def set_filial_ativa():
+    """Troca a filial ATIVA do próprio usuário (seletor no topo). A filial precisa
+    estar entre as que ele pode acessar (filialIds). Afeta as credenciais Omie e a
+    lista de OS a partir da próxima requisição."""
+    full_data = load_data()
+    username = _resolve_token(full_data, request.headers.get('Authorization'))
+    if not username:
+        return jsonify({"error": "Não autorizado"}), 401
+    u = full_data['users'].get(username) or {}
+    fid = (request.json or {}).get('filialId')
+    permitidas = u.get('filialIds') or [u.get('filialId', 'matriz')]
+    if fid not in permitidas:
+        return jsonify({"error": "Você não tem acesso a essa filial."}), 403
+    u['filialId'] = fid
+    save_data(full_data)
+    return jsonify({"success": True, "filialId": fid})
 
 
 # ==========================================================
@@ -4354,6 +4439,11 @@ HTML_PAGE = """
             const [editingModelId, setEditingModelId] = useState(null);
             const [usersList, setUsersList] = useState([]);
             const [filiaisList, setFiliaisList] = useState([]);
+            const [approveRole, setApproveRole] = useState({}); // {username: 'user'|'admin'} na aprovação
+            const [approveFiliais, setApproveFiliais] = useState({}); // {username: [filialIds]} na aprovação
+            const [createFiliais, setCreateFiliais] = useState([]); // filiais marcadas na criação manual
+            const [filiaisPublicas, setFiliaisPublicas] = useState([]); // lista p/ auto-cadastro (sem segredos)
+            const [regFiliais, setRegFiliais] = useState([]); // filiais marcadas no auto-cadastro
 
             // Estados de Ordens de Serviço (Omie)
             const [osDrafts, setOsDrafts] = useState([]);
@@ -4377,6 +4467,7 @@ HTML_PAGE = """
 
             useEffect(() => {
                 fetch('/api/logo').then(r => r.json()).then(d => { if (d.logo) setPublicLogo(d.logo); }).catch(() => {});
+                fetch('/api/filiais-publicas').then(r => r.json()).then(d => setFiliaisPublicas(Array.isArray(d) ? d : [])).catch(() => {});
             }, []);
 
             useEffect(() => {
@@ -4505,11 +4596,12 @@ HTML_PAGE = """
                 }).then(r => r.json()).then(() => fetchFiliais());
             };
 
-            const trocarFilialUsuario = (username, filialId) => {
+            const trocarFiliaisUsuario = (username, filialIds) => {
+                if (!filialIds || filialIds.length === 0) { alert('O usuário precisa ter ao menos uma filial.'); return; }
                 fetch(`/api/users/${encodeURIComponent(username)}/filial`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
-                    body: JSON.stringify({ filialId })
+                    body: JSON.stringify({ filialIds })
                 }).then(r => r.json()).then(d => { if (d.success) fetchUsers(); else alert(d.error || 'Erro'); });
             };
 
@@ -5034,7 +5126,7 @@ HTML_PAGE = """
                     body: JSON.stringify({ username, password })
                 }).then(r => r.json().then(data => ({status: r.status, data}))).then(({status, data}) => {
                     if (data.success) {
-                        const newAuth = { token: data.token, username: data.username, role: data.role, firstName: data.firstName, lastName: data.lastName };
+                        const newAuth = { token: data.token, username: data.username, role: data.role, firstName: data.firstName, lastName: data.lastName, filialId: data.filialId, filialIds: data.filialIds || [], filiais: data.filiais || [] };
                         localStorage.setItem('smartReportAuth', JSON.stringify(newAuth));
                         setAuth(newAuth);
                         if (data.mustResetPassword) setMustChangePwd(true);
@@ -5052,13 +5144,18 @@ HTML_PAGE = """
                     setRegisterMsg({ type: 'error', text: 'As senhas não coincidem.' });
                     return;
                 }
+                if (filiaisPublicas.length > 0 && regFiliais.length === 0) {
+                    setRegisterMsg({ type: 'error', text: 'Selecione ao menos uma filial.' });
+                    return;
+                }
                 const payload = {
                     username: f.username.value,
                     password: f.password.value,
                     firstName: f.firstName.value,
                     lastName: f.lastName.value,
                     email: f.email.value,
-                    phone: f.phone.value
+                    phone: f.phone.value,
+                    filialIds: regFiliais
                 };
                 fetch('/api/register', {
                     method: 'POST',
@@ -5068,6 +5165,7 @@ HTML_PAGE = """
                     if (data.success) {
                         setRegisterMsg({ type: 'success', text: data.message || 'Conta criada! Aguarde aprovação.' });
                         f.reset();
+                        setRegFiliais([]);
                     } else {
                         setRegisterMsg({ type: 'error', text: data.message || 'Erro ao cadastrar.' });
                     }
@@ -5119,6 +5217,25 @@ HTML_PAGE = """
                 setCellVoltages({});
                 setMotorResistances({});
                 setLaudosList([]);
+            };
+
+            const trocarFilialAtiva = (fid) => {
+                if (!fid || fid === auth.filialId) return;
+                fetch('/api/me/filial-ativa', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                    body: JSON.stringify({ filialId: fid })
+                }).then(r => r.json()).then(d => {
+                    if (d.success) {
+                        const newAuth = { ...auth, filialId: fid };
+                        localStorage.setItem('smartReportAuth', JSON.stringify(newAuth));
+                        setAuth(newAuth);
+                        // Recarrega pra atualizar OS, CRM e contexto Omie da nova filial ativa.
+                        window.location.reload();
+                    } else {
+                        alert(d.error || 'Erro ao trocar de filial');
+                    }
+                }).catch(() => alert('Erro de conexão'));
             };
 
             if (!auth) {
@@ -5191,6 +5308,20 @@ HTML_PAGE = """
                                             <input name="confirmPassword" type="password" required minLength="6" className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm" />
                                         </div>
                                     </div>
+                                    ${filiaisPublicas.length > 0 && html`
+                                        <div className="border-t border-slate-200 pt-3">
+                                            <label className="block text-xs font-medium text-slate-700 mb-1">Filial(is) *</label>
+                                            <div className="flex flex-wrap gap-2">
+                                                ${filiaisPublicas.map(f => html`
+                                                    <label key=${f.id} className=${`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-sm cursor-pointer transition ${regFiliais.includes(f.id) ? 'bg-blue-50 border-blue-400 text-blue-700' : 'bg-white border-slate-300 text-slate-600'}`}>
+                                                        <input type="checkbox" checked=${regFiliais.includes(f.id)} onChange=${e => setRegFiliais(e.target.checked ? [...regFiliais, f.id] : regFiliais.filter(x => x !== f.id))} className="w-4 h-4 text-blue-600" />
+                                                        ${f.nome}
+                                                    </label>
+                                                `)}
+                                            </div>
+                                            <p className="text-[11px] text-slate-400 mt-1">Marque uma ou mais. O administrador pode ajustar na aprovação.</p>
+                                        </div>
+                                    `}
                                     ${registerMsg.text && html`
                                         <div className=${`text-sm font-medium text-center p-2 rounded ${registerMsg.type === 'success' ? 'text-green-700 bg-green-50' : 'text-red-600 bg-red-50'}`}>${registerMsg.text}</div>
                                     `}
@@ -6772,14 +6903,14 @@ HTML_PAGE = """
                         lastName: f.lastName.value,
                         email: f.email.value,
                         phone: f.phone.value,
-                        filialId: f.filialId ? f.filialId.value : 'matriz'
+                        filialIds: createFiliais
                     };
                     fetch('/api/users', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
                         body: JSON.stringify(payload)
                     }).then(r => r.json()).then(d => {
-                        if(d.success) { f.reset(); fetchUsers(); }
+                        if(d.success) { f.reset(); setCreateFiliais([]); fetchUsers(); }
                         else alert(d.error || 'Erro ao criar usuário');
                     });
                 };
@@ -6840,9 +6971,28 @@ HTML_PAGE = """
                                                     <span><i className="ph ph-phone"></i> ${u.phone}</span>
                                                 </div>
                                             </div>
-                                            <div className="flex gap-2">
-                                                <button onClick=${() => callUserAction(u.username, 'approve')} className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded font-medium text-sm flex items-center gap-1"><i className="ph-bold ph-check"></i> Aprovar</button>
-                                                <button onClick=${() => handleDeleteUser(u.username)} className="bg-red-100 hover:bg-red-200 text-red-700 px-4 py-2 rounded font-medium text-sm flex items-center gap-1"><i className="ph-bold ph-x"></i> Rejeitar</button>
+                                            <div className="flex flex-col gap-2 md:items-end">
+                                                ${filiaisList.length > 0 && html`
+                                                    <div className="flex flex-wrap gap-1 md:justify-end">
+                                                        <span className="text-[11px] text-slate-400 self-center">Filiais:</span>
+                                                        ${filiaisList.map(f => {
+                                                            const sel = approveFiliais[u.username] || u.filialIds || ['matriz'];
+                                                            const checked = sel.includes(f.id);
+                                                            return html`<label key=${f.id} className=${`flex items-center gap-1 px-1.5 py-0.5 rounded border text-[11px] cursor-pointer ${checked ? 'bg-blue-50 border-blue-300 text-blue-700' : 'bg-white border-slate-200 text-slate-500'}`}>
+                                                                <input type="checkbox" checked=${checked} onChange=${e => { const base = approveFiliais[u.username] || u.filialIds || ['matriz']; const novo = e.target.checked ? [...new Set([...base, f.id])] : base.filter(x => x !== f.id); setApproveFiliais({ ...approveFiliais, [u.username]: novo }); }} className="w-3 h-3" />
+                                                                ${f.nome}
+                                                            </label>`;
+                                                        })}
+                                                    </div>
+                                                `}
+                                                <div className="flex gap-2 items-center flex-wrap md:justify-end">
+                                                    <select value=${approveRole[u.username] || 'user'} onChange=${e => setApproveRole({ ...approveRole, [u.username]: e.target.value })} className="p-2 border border-slate-300 rounded text-sm bg-white" title="Papel ao aprovar">
+                                                        <option value="user">Usuário comum</option>
+                                                        <option value="admin">Administrador</option>
+                                                    </select>
+                                                    <button onClick=${() => callUserAction(u.username, 'approve', { body: { role: approveRole[u.username] || 'user', filialIds: approveFiliais[u.username] || u.filialIds || ['matriz'] } })} className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded font-medium text-sm flex items-center gap-1"><i className="ph-bold ph-check"></i> Aprovar</button>
+                                                    <button onClick=${() => handleDeleteUser(u.username)} className="bg-red-100 hover:bg-red-200 text-red-700 px-4 py-2 rounded font-medium text-sm flex items-center gap-1"><i className="ph-bold ph-x"></i> Rejeitar</button>
+                                                </div>
                                             </div>
                                         </div>
                                     `)}
@@ -6865,9 +7015,17 @@ HTML_PAGE = """
                                     <option value="user">Usuário Padrão</option>
                                     <option value="admin">Administrador</option>
                                 </select>
-                                <select name="filialId" className="p-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-500 outline-none bg-white">
-                                    ${filiaisList.map(f => html`<option key=${f.id} value=${f.id}>Filial: ${f.nome}</option>`)}
-                                </select>
+                                <div className="md:col-span-2 border border-slate-200 rounded p-2">
+                                    <div className="text-xs text-slate-500 mb-1">Filial(is) — marque uma ou mais:</div>
+                                    <div className="flex flex-wrap gap-2">
+                                        ${filiaisList.map(f => html`
+                                            <label key=${f.id} className=${`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-sm cursor-pointer transition ${createFiliais.includes(f.id) ? 'bg-blue-50 border-blue-400 text-blue-700' : 'bg-white border-slate-300 text-slate-600'}`}>
+                                                <input type="checkbox" checked=${createFiliais.includes(f.id)} onChange=${e => setCreateFiliais(e.target.checked ? [...createFiliais, f.id] : createFiliais.filter(x => x !== f.id))} className="w-4 h-4 text-blue-600" />
+                                                ${f.nome}
+                                            </label>
+                                        `)}
+                                    </div>
+                                </div>
                                 <button type="submit" className="bg-blue-600 text-white px-6 py-2 rounded font-medium hover:bg-blue-700 md:col-span-2">Criar Usuário</button>
                             </form>
                         </div>
@@ -6902,9 +7060,17 @@ HTML_PAGE = """
                                                     <span className=${`px-2 py-0.5 rounded text-xs font-bold ${u.role==='admin'?'bg-indigo-100 text-indigo-700':'bg-slate-200 text-slate-700'}`}>${u.role.toUpperCase()}</span>
                                                 </td>
                                                 <td className="p-3">
-                                                    <select value=${u.filialId || 'matriz'} onChange=${e => trocarFilialUsuario(u.username, e.target.value)} className="text-xs p-1 border border-slate-300 rounded bg-white">
-                                                        ${filiaisList.map(f => html`<option key=${f.id} value=${f.id}>${f.nome}</option>`)}
-                                                    </select>
+                                                    <div className="flex flex-wrap gap-1">
+                                                        ${filiaisList.map(f => {
+                                                            const membership = u.filialIds || [u.filialId || 'matriz'];
+                                                            const checked = membership.includes(f.id);
+                                                            const ativa = (u.filialId || 'matriz') === f.id;
+                                                            return html`<label key=${f.id} className=${`flex items-center gap-1 px-1.5 py-0.5 rounded border text-[11px] cursor-pointer ${checked ? 'bg-blue-50 border-blue-300 text-blue-700' : 'bg-white border-slate-200 text-slate-400'}`} title=${ativa ? 'Filial ativa do usuário' : 'Acesso à filial'}>
+                                                                <input type="checkbox" checked=${checked} onChange=${e => { const m = (u.filialIds || [u.filialId || 'matriz']); const novo = e.target.checked ? [...new Set([...m, f.id])] : m.filter(x => x !== f.id); trocarFiliaisUsuario(u.username, novo); }} className="w-3 h-3" />
+                                                                ${f.nome}${ativa ? html` <i className="ph-fill ph-star text-amber-500" title="ativa"></i>` : ''}
+                                                            </label>`;
+                                                        })}
+                                                    </div>
                                                 </td>
                                                 <td className="p-3">${statusBadge(u.status)}</td>
                                                 <td className="p-3 text-right whitespace-nowrap">
@@ -7683,6 +7849,14 @@ HTML_PAGE = """
                                         <i className="ph-fill ph-user-circle"></i> Olá, <b className="text-white">${auth.username || auth.firstName || 'usuário'}</b>
                                         <button onClick=${handleLogout} className="ml-2 text-red-400 hover:text-red-300 underline font-medium text-xs">Sair da Conta</button>
                                     </span>
+                                    ${(auth.filiais && auth.filiais.length > 1) ? html`
+                                        <span className="text-slate-400 text-xs mt-1 flex items-center gap-1">
+                                            <i className="ph-fill ph-buildings text-blue-400"></i> Filial ativa:
+                                            <select value=${auth.filialId} onChange=${e => trocarFilialAtiva(e.target.value)} className="bg-slate-800 text-white border border-slate-600 rounded px-1.5 py-0.5 text-xs">
+                                                ${auth.filiais.map(f => html`<option key=${f.id} value=${f.id}>${f.nome}</option>`)}
+                                            </select>
+                                        </span>
+                                    ` : (auth.filiais && auth.filiais.length === 1 ? html`<span className="text-slate-500 text-xs mt-1"><i className="ph-fill ph-buildings"></i> ${auth.filiais[0].nome}</span>` : '')}
                                 </div>
                             </div>
                             <div className="flex gap-2 flex-wrap">
