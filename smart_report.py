@@ -1448,6 +1448,7 @@ CRM_FASES = {
     10843780555: "06 Enviadas",
 }
 CRM_FASE_ANALISE = 10843780550
+CRM_FASE_APROVACAO = 10843780551
 CRM_FASE_PREPARACAO = 10843780552
 
 # Pra qual fase a oportunidade vai quando o técnico finaliza (gera OS+orçamento):
@@ -1565,14 +1566,14 @@ def _crm_buscar_cliente_faturamento(doc):
 
 @app.route('/api/crm/oportunidades', methods=['GET'])
 def crm_listar_oportunidades():
-    """Lista oportunidades nas fases '01 Em Análise' e '03 Em Preparação'.
+    """Lista oportunidades nas fases '01 Em Análise', '02 Em Aprovação' e '03 Em Preparação'.
     Filtro ?fase= opcional (codigo). Não resolve a conta de cada uma (lento);
     isso é feito ao puxar uma oportunidade específica."""
     user, full_data, err = _require_user()
     if err:
         return err
     fase_arg = request.args.get('fase')
-    fases = [int(fase_arg)] if fase_arg else [CRM_FASE_ANALISE, CRM_FASE_PREPARACAO]
+    fases = [int(fase_arg)] if fase_arg else [CRM_FASE_ANALISE, CRM_FASE_APROVACAO, CRM_FASE_PREPARACAO]
     items = []
     erro = None
     for fase in fases:
@@ -1628,8 +1629,6 @@ def _parse_omie_date(s):
 # MAPPING-FREE: pegamos a MAIOR data (última transição), sem atribuir a uma fase
 # específica — porque o mapeamento campo↔fase ainda não foi confirmado com dados reais.
 FASES_DATE_FIELDS = ('dNovoLead', 'dQualificacao', 'dShowRoom', 'dTreinamento', 'dProjeto', 'dConclusao')
-# Fase de Aprovação não tem constante própria; é a do meio entre Análise e Preparação.
-CRM_FASE_APROVACAO = 10843780551
 
 
 @app.route('/api/admin/crm-tempo-fases', methods=['GET'])
@@ -6897,6 +6896,7 @@ HTML_PAGE = """
             const renderCRM = () => {
                 const opsFiltradas = crmOps.filter(o => {
                     if (crmFiltro === 'analise') return o.faseCodigo === 10843780550;
+                    if (crmFiltro === 'aprovacao') return o.faseCodigo === 10843780551;
                     if (crmFiltro === 'preparacao') return o.faseCodigo === 10843780552;
                     return true;
                 });
@@ -6922,7 +6922,7 @@ HTML_PAGE = """
                         </div>
 
                         <div className="flex gap-2 flex-wrap">
-                            ${[['todas', 'Todas'], ['analise', '01 Em Análise'], ['preparacao', '03 Em Preparação']].map(([k, label]) => html`
+                            ${[['todas', 'Todas'], ['analise', '01 Em Análise'], ['aprovacao', '02 Em Aprovação'], ['preparacao', '03 Em Preparação']].map(([k, label]) => html`
                                 <button key=${k} onClick=${() => setCrmFiltro(k)} className=${`px-3 py-1.5 rounded-lg text-sm font-medium transition ${crmFiltro === k ? 'bg-amber-600 text-white' : 'bg-white border border-slate-300 text-slate-600 hover:bg-slate-100'}`}>${label}</button>
                             `)}
                         </div>
