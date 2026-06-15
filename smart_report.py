@@ -2382,7 +2382,9 @@ def os_create():
         "crmFaseCodigo": body.get('crmFaseCodigo') or None,
         "laudoId": body.get('laudoId') or None,
         "garantiaStatus": body.get('garantiaStatus') or 'avulsa',
-        "garantiaMotivo": body.get('garantiaMotivo') or ''
+        "garantiaMotivo": body.get('garantiaMotivo') or '',
+        "execEstado": "a_executar",
+        "execMotivoReprova": ""
     }
     drafts = _user_drafts(full_data, user)
     drafts.append(draft)
@@ -2433,6 +2435,70 @@ def os_registrar_pecas(os_id):
     draft['updatedAt'] = datetime.utcnow().isoformat() + "Z"
     save_data(full_data)
     return jsonify({"success": True})
+
+
+# Estados válidos do fluxo de execução/teste (fase "03 Em Preparação").
+EXEC_ESTADOS = ('a_executar', 'aguardando_teste', 'aprovado', 'reprovado')
+
+
+@app.route('/api/os/<os_id>/execucao', methods=['POST'])
+def os_execucao(os_id):
+    """Fluxo de execução + teste na fase 'Em Preparação':
+    a_executar → aguardando_teste → aprovado | reprovado (com motivo).
+    Funciona em OS já enviada (a execução acontece depois do envio da OS)."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    owner, draft = _find_filial_draft(full_data, user, os_id)
+    if not draft:
+        return jsonify({"error": "OS não encontrada"}), 404
+    body = request.json or {}
+    estado = (body.get('estado') or '').strip()
+    if estado not in EXEC_ESTADOS:
+        return jsonify({"error": f"Estado inválido. Use um de: {', '.join(EXEC_ESTADOS)}."}), 400
+    motivo = (body.get('motivo') or '').strip()
+    if estado == 'reprovado' and not motivo:
+        return jsonify({"error": "Informe o motivo da reprovação no teste."}), 400
+
+    now = datetime.utcnow().isoformat() + "Z"
+    draft['execEstado'] = estado
+    if estado == 'reprovado':
+        draft['execMotivoReprova'] = motivo
+    elif estado == 'aprovado':
+        draft['execMotivoReprova'] = ''
+    # Marcos de tempo (úteis para "tempo nas fases" no futuro)
+    if estado == 'aguardando_teste':
+        draft['execConcluidaAt'] = now
+    elif estado in ('aprovado', 'reprovado'):
+        draft['execTestadoAt'] = now
+    draft['updatedAt'] = now
+    save_data(full_data)
+    return jsonify(draft)
+
+
+@app.route('/api/os/<os_id>/sync-crm-fase', methods=['POST'])
+def os_sync_crm_fase(os_id):
+    """Sincroniza a fase do CRM cacheada no draft com a fase ATUAL da oportunidade.
+    A equipe move a oportunidade no Omie (ex.: Análise→Preparação); o draft precisa
+    refletir isso para o painel de Execução e o destino da finalização. Funciona em
+    OS já enviada (não passa pelo bloqueio do os_update)."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    owner, draft = _find_filial_draft(full_data, user, os_id)
+    if not draft:
+        return jsonify({"error": "OS não encontrada"}), 404
+    body = request.json or {}
+    try:
+        fase = int(body.get('crmFaseCodigo'))
+    except (TypeError, ValueError):
+        return jsonify({"error": "crmFaseCodigo inválido."}), 400
+    if fase not in CRM_FASES:
+        return jsonify({"error": "Fase desconhecida."}), 400
+    draft['crmFaseCodigo'] = fase
+    draft['updatedAt'] = datetime.utcnow().isoformat() + "Z"
+    save_data(full_data)
+    return jsonify(draft)
 
 
 @app.route('/api/pecas/buscar-serial', methods=['GET'])
@@ -3760,6 +3826,10 @@ def os_crm_finalizar(os_id):
     fase_movida = False
     fase_warning = None
 
+    # TRAVA: Preparação→Finalizadas exige o teste do equipamento APROVADO.
+    if fase_atual == CRM_FASE_PREPARACAO and (draft.get('execEstado') != 'aprovado'):
+        return jsonify({"error": "Para enviar para Finalizadas, marque o teste do equipamento como APROVADO no painel de Execução & Teste da OS."}), 400
+
     # Monta a referência cruzada (OS + PV) pra registrar nas observações da oportunidade.
     os_num = draft.get('omieOsNumber') or '—'
     pv_num = draft.get('pedidoVendaNumero') or '—'
@@ -3773,10 +3843,15 @@ def os_crm_finalizar(os_id):
         obs_atual = (cons.get('observacoes', {}) or {}).get('cObs', '') or ''
     except OmieError:
         pass
-    if f"OS nº {os_num}" in obs_atual:
-        novo_obs = obs_atual  # já registrado antes; não duplica
-    else:
-        novo_obs = (obs_atual + ("\n\n" if obs_atual else "") + ref_linha).strip()
+    # Anexa só as linhas ainda não presentes (idempotência).
+    linhas_novas = []
+    if f"OS nº {os_num}" not in obs_atual:
+        linhas_novas.append(ref_linha)
+    if fase_atual == CRM_FASE_PREPARACAO and draft.get('execEstado') == 'aprovado' and 'Teste do equipamento' not in obs_atual:
+        linhas_novas.append(f"[Smart Report] Teste do equipamento: APROVADO em {hoje}.")
+    novo_obs = obs_atual
+    if linhas_novas:
+        novo_obs = (obs_atual + ("\n\n" if obs_atual else "") + "\n".join(linhas_novas)).strip()
 
     # Uma única chamada: grava a referência e (se houver) move a fase.
     param_alt = {
@@ -4205,6 +4280,9 @@ HTML_PAGE = """
             const [produtoResults, setProdutoResults] = useState([]);
             const [osSendError, setOsSendError] = useState('');
             const [finalizando, setFinalizando] = useState(false);
+            const [execMotivo, setExecMotivo] = useState('');      // motivo de reprovação no teste
+            const [execReprovaOpen, setExecReprovaOpen] = useState(false);
+            const [execSalvando, setExecSalvando] = useState(false);
 
             useEffect(() => {
                 fetch('/api/logo').then(r => r.json()).then(d => { if (d.logo) setPublicLogo(d.logo); }).catch(() => {});
@@ -6747,7 +6825,20 @@ HTML_PAGE = """
                                                 </td>
                                                 <td className="p-3 text-right">
                                                     <div className="flex gap-1 justify-end flex-wrap">
-                                                        ${draftDaOp && html`<button onClick=${() => { setCurrentOs(draftDaOp); setActiveTab('os'); }} className="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded text-xs font-medium whitespace-nowrap" title="Abrir a OS para ver serviços/peças e registrar substituições"><i className="ph-bold ph-wrench"></i> Abrir OS</button>`}
+                                                        ${draftDaOp && html`<button onClick=${async () => {
+                                                            setCurrentOs({ ...draftDaOp, crmFaseCodigo: o.faseCodigo });
+                                                            setActiveTab('os');
+                                                            // Sincroniza a fase atual da oportunidade no draft (pode ter mudado no Omie).
+                                                            try {
+                                                                const r = await fetch(`/api/os/${draftDaOp.id}/sync-crm-fase`, {
+                                                                    method: 'POST',
+                                                                    headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                                                                    body: JSON.stringify({ crmFaseCodigo: o.faseCodigo })
+                                                                });
+                                                                const d = await r.json();
+                                                                if (d && d.id) { setCurrentOs(d); fetchOsDrafts(); }
+                                                            } catch (e) {}
+                                                        }} className="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded text-xs font-medium whitespace-nowrap" title="Abrir a OS para ver serviços/peças, executar e registrar o teste"><i className="ph-bold ph-wrench"></i> Abrir OS</button>`}
                                                         <button onClick=${() => puxarOportunidadeParaLaudo(o.nCodOp)} disabled=${puxandoCrm === o.nCodOp} className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded text-xs font-medium whitespace-nowrap disabled:bg-slate-400">
                                                             ${puxandoCrm === o.nCodOp ? html`<i className="ph ph-spinner animate-spin"></i> Carregando...` : html`<i className="ph-bold ph-file-text"></i> Carregar laudo`}
                                                         </button>
@@ -6796,6 +6887,52 @@ HTML_PAGE = """
                     const addPart = () => updateOs({ parts: [...(currentOs.parts || []), { omieProductId: null, code: '', description: '', quantity: 1, unitPrice: 0 }] });
                     const removePart = (i) => updateOs({ parts: currentOs.parts.filter((_, idx) => idx !== i) });
                     const isLocked = currentOs.status === 'sent';
+
+                    // ---- Execução & Teste (fase "03 Em Preparação") ----
+                    const emPreparacao = currentOs.crmFaseCodigo === 10843780552;
+                    const execEstado = currentOs.execEstado || 'a_executar';
+                    const setExecEstado = async (estado, motivo) => {
+                        setExecSalvando(true);
+                        try {
+                            const r = await fetch(`/api/os/${currentOs.id}/execucao`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                                body: JSON.stringify({ estado, motivo: motivo || '' })
+                            });
+                            const d = await r.json();
+                            if (d && d.id) {
+                                setCurrentOs(d);
+                                fetchOsDrafts();
+                                setExecReprovaOpen(false);
+                                setExecMotivo('');
+                            } else {
+                                alert('Erro: ' + (d.error || 'falha ao atualizar execução'));
+                            }
+                        } catch (e) { alert('Erro de rede: ' + (e.message || e)); }
+                        finally { setExecSalvando(false); }
+                    };
+                    const enviarParaFinalizadas = async () => {
+                        if (!confirm('Confirmar aprovação no teste e enviar a oportunidade para "04 Finalizadas"?')) return;
+                        setExecSalvando(true);
+                        try {
+                            const r = await fetch(`/api/os/${currentOs.id}/crm-finalizar`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json', 'Authorization': auth.token }
+                            });
+                            const d = await r.json();
+                            if (d.success) {
+                                let msg = 'Oportunidade enviada para Finalizadas!';
+                                if (d.faseMovida) msg += `\\n\\nFase: ${d.faseNova}`;
+                                if (d.warning) msg += `\\n\\n⚠️ ${d.warning}`;
+                                alert(msg);
+                                setCurrentOs(prev => prev ? { ...prev, crmFaseCodigo: d.faseMovida ? 10843780553 : prev.crmFaseCodigo } : prev);
+                                fetchOsDrafts();
+                            } else {
+                                alert('Erro: ' + (d.error || 'falha ao enviar para Finalizadas'));
+                            }
+                        } catch (e) { alert('Erro de rede: ' + (e.message || e)); }
+                        finally { setExecSalvando(false); }
+                    };
 
                     return html`
                         <div className="space-y-6 animate-in fade-in duration-300">
@@ -6862,6 +6999,64 @@ HTML_PAGE = """
                                 <div className="bg-red-50 border border-red-300 p-3 rounded-lg text-sm text-red-800 flex items-start gap-2">
                                     <i className="ph-fill ph-shield-warning text-lg mt-0.5"></i>
                                     <span><b>Garantia NEGADA.</b> Reparo segue como serviço pago. Ao anexar/baixar, saem <b>2 documentos separados</b>: o laudo da negativa e o orçamento.${currentOs.garantiaMotivo ? html` Motivo: <i>${currentOs.garantiaMotivo}</i>` : ''}</span>
+                                </div>
+                            `}
+
+                            ${emPreparacao && html`
+                                <div className="bg-white p-6 rounded-xl shadow-sm border-2 border-indigo-200">
+                                    <h3 className="text-lg font-semibold mb-1 text-slate-800 flex items-center gap-2"><i className="ph-fill ph-wrench text-indigo-600 text-xl"></i> Execução & Teste</h3>
+                                    <p className="text-sm text-slate-500 mb-4">Oportunidade em <b>03 Em Preparação</b>. Execute o que está planejado abaixo e, depois, registre o teste do equipamento.</p>
+
+                                    <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 mb-4">
+                                        <div className="text-xs font-bold uppercase text-slate-400 mb-2">Plano de trabalho</div>
+                                        ${((currentOs.services || []).length === 0 && (currentOs.parts || []).length === 0) ? html`
+                                            <p className="text-sm text-slate-400">Sem serviços/peças cadastrados nesta OS.</p>
+                                        ` : html`
+                                            <div className="grid md:grid-cols-2 gap-4 text-sm">
+                                                <div>
+                                                    <div className="font-semibold text-slate-700 mb-1"><i className="ph-bold ph-wrench"></i> Serviços a executar</div>
+                                                    ${(currentOs.services || []).length ? html`<ul className="list-disc list-inside text-slate-600 space-y-0.5">${currentOs.services.map((s, i) => html`<li key=${i}>${s.description || s.code || 'serviço'}${s.quantity > 1 ? ` (${s.quantity}x)` : ''}</li>`)}</ul>` : html`<span className="text-slate-400">—</span>`}
+                                                </div>
+                                                <div>
+                                                    <div className="font-semibold text-slate-700 mb-1"><i className="ph-bold ph-package"></i> Peças a substituir</div>
+                                                    ${(currentOs.parts || []).length ? html`<ul className="list-disc list-inside text-slate-600 space-y-0.5">${currentOs.parts.map((p, i) => html`<li key=${i}>${p.description || p.code || 'peça'}${p.quantity > 1 ? ` (${p.quantity}x)` : ''}</li>`)}</ul>` : html`<span className="text-slate-400">—</span>`}
+                                                </div>
+                                            </div>
+                                            ${currentOs.observations ? html`<div className="mt-3"><div className="font-semibold text-slate-700 mb-1 text-sm"><i className="ph-bold ph-note"></i> Observações</div><div className="text-sm text-slate-600 whitespace-pre-wrap">${currentOs.observations}</div></div>` : ''}
+                                        `}
+                                    </div>
+
+                                    ${(execEstado === 'a_executar' || execEstado === 'reprovado') && html`
+                                        ${execEstado === 'reprovado' && html`<div className="bg-red-50 border border-red-200 text-red-700 p-3 rounded-lg text-sm mb-3"><b>Teste anterior REPROVADO.</b> Motivo: ${currentOs.execMotivoReprova || '—'}. Refaça a execução e teste novamente.</div>`}
+                                        <button onClick=${() => setExecEstado('aguardando_teste')} disabled=${execSalvando} className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-400 text-white px-5 py-2.5 rounded-lg font-bold flex items-center gap-2"><i className="ph-bold ph-check-square-offset"></i> Marcar execução concluída → enviar para teste</button>
+                                    `}
+
+                                    ${execEstado === 'aguardando_teste' && html`
+                                        <div className="bg-amber-50 border border-amber-300 text-amber-800 p-3 rounded-lg text-sm mb-3 flex items-center gap-2"><i className="ph-fill ph-flask text-lg"></i> <span><b>Equipamento aguardando teste.</b> Realize o teste e registre o resultado.</span></div>
+                                        ${!execReprovaOpen ? html`
+                                            <div className="flex gap-2 flex-wrap">
+                                                <button onClick=${() => setExecEstado('aprovado')} disabled=${execSalvando} className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-400 text-white px-5 py-2.5 rounded-lg font-bold flex items-center gap-2"><i className="ph-bold ph-check-circle"></i> Aprovado no teste</button>
+                                                <button onClick=${() => setExecReprovaOpen(true)} disabled=${execSalvando} className="bg-red-600 hover:bg-red-700 disabled:bg-slate-400 text-white px-5 py-2.5 rounded-lg font-bold flex items-center gap-2"><i className="ph-bold ph-x-circle"></i> Reprovado no teste</button>
+                                            </div>
+                                        ` : html`
+                                            <div className="space-y-2">
+                                                <label className="text-sm font-semibold text-slate-700">Motivo da reprovação</label>
+                                                <textarea value=${execMotivo} onChange=${e => setExecMotivo(e.target.value)} rows="3" placeholder="Descreva por que o equipamento não passou no teste..." className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-red-400 outline-none"></textarea>
+                                                <div className="flex gap-2">
+                                                    <button onClick=${() => { if (!execMotivo.trim()) { alert('Escreva o motivo da reprovação.'); return; } setExecEstado('reprovado', execMotivo.trim()); }} disabled=${execSalvando} className="bg-red-600 hover:bg-red-700 disabled:bg-slate-400 text-white px-4 py-2 rounded-lg font-bold">Confirmar reprovação</button>
+                                                    <button onClick=${() => { setExecReprovaOpen(false); setExecMotivo(''); }} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-lg font-medium">Cancelar</button>
+                                                </div>
+                                            </div>
+                                        `}
+                                    `}
+
+                                    ${execEstado === 'aprovado' && html`
+                                        <div className="bg-emerald-50 border border-emerald-300 text-emerald-800 p-3 rounded-lg text-sm mb-3 flex items-center gap-2"><i className="ph-fill ph-seal-check text-lg"></i> <span><b>Aprovado nos testes.</b> Envie a oportunidade para Finalizadas.</span></div>
+                                        <div className="flex gap-2 flex-wrap">
+                                            <button onClick=${enviarParaFinalizadas} disabled=${execSalvando} className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-400 text-white px-5 py-2.5 rounded-lg font-bold flex items-center gap-2"><i className="ph-bold ph-paper-plane-tilt"></i> Aprovar e enviar → 04 Finalizadas</button>
+                                            <button onClick=${() => setExecEstado('aguardando_teste')} disabled=${execSalvando} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2.5 rounded-lg font-medium">Reabrir teste</button>
+                                        </div>
+                                    `}
                                 </div>
                             `}
 
