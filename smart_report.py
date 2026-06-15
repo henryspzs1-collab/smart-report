@@ -1681,7 +1681,7 @@ def crm_tempo_fases():
     por_fase = {}
     for it in items:
         fn = it['faseNome']
-        b = por_fase.setdefault(fn, {"fase": fn, "qtd": 0, "diasTotal": 0, "diasMax": 0, "comData": 0})
+        b = por_fase.setdefault(fn, {"fase": fn, "faseCodigo": it['faseCodigo'], "qtd": 0, "diasTotal": 0, "diasMax": 0, "comData": 0})
         b["qtd"] += 1
         if it['diasNaFase'] is not None:
             b["diasTotal"] += it['diasNaFase']
@@ -1690,7 +1690,7 @@ def crm_tempo_fases():
     resumo = []
     for fn, v in por_fase.items():
         media = round(v["diasTotal"] / v["comData"], 1) if v["comData"] else None
-        resumo.append({"fase": fn, "qtd": v["qtd"], "diasMedio": media, "diasMax": v["diasMax"]})
+        resumo.append({"fase": fn, "faseCodigo": v["faseCodigo"], "qtd": v["qtd"], "diasMedio": media, "diasMax": v["diasMax"]})
     resumo.sort(key=lambda x: x["fase"])
     items.sort(key=lambda x: (x["diasNaFase"] is None, -(x["diasNaFase"] or 0)))
     return jsonify({"items": items, "resumo": resumo, "erro": erro})
@@ -4318,6 +4318,10 @@ HTML_PAGE = """
             const [relTec, setRelTec] = useState('');
             const [tempoFases, setTempoFases] = useState(null);
             const [tempoFasesRaw, setTempoFasesRaw] = useState(false); // mostrar datas brutas (conferência do mapeamento)
+            const [tfFase, setTfFase] = useState('todas');   // filtro de fase
+            const [tfDias, setTfDias] = useState('todos');   // filtro de dias parados
+            const [tfBusca, setTfBusca] = useState('');      // busca por nº/descrição
+            const [tfOrdem, setTfOrdem] = useState('dias');  // ordenação: dias | entrada
 
             // DADOS GLOBAIS (Admin dita as regras)
             const [headerConfig, setHeaderConfig] = useState([]);
@@ -6308,6 +6312,23 @@ HTML_PAGE = """
             const renderRelatorios = () => {
                 const r = relatorio;
                 const fmt = (v) => 'R$ ' + parseFloat(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                // Filtros do "Tempo nas fases" (client-side sobre tempoFases.items)
+                const tfTotal = (tempoFases && tempoFases.items) ? tempoFases.items.length : 0;
+                let tfItens = (tempoFases && tempoFases.items) ? tempoFases.items.filter(it => {
+                    if (tfFase !== 'todas' && String(it.faseCodigo) !== String(tfFase)) return false;
+                    if (tfDias === '7' && !(it.diasNaFase >= 7)) return false;
+                    if (tfDias === '15' && !(it.diasNaFase >= 15)) return false;
+                    if (tfBusca) {
+                        const q = tfBusca.toLowerCase();
+                        if (!((it.cNumOp || '').toLowerCase().includes(q) || (it.descricao || '').toLowerCase().includes(q))) return false;
+                    }
+                    return true;
+                }) : [];
+                // Padrão ('dias') já vem do backend ordenado por mais dias parado primeiro.
+                if (tfOrdem === 'recentes') {
+                    // entrada mais recente primeiro = menos dias parado (sem data por último)
+                    tfItens = [...tfItens].sort((a, b) => (a.diasNaFase === null) - (b.diasNaFase === null) || (a.diasNaFase || 0) - (b.diasNaFase || 0));
+                }
                 const barra = (label, valor, max, cor, sufixo) => html`
                     <div className="mb-2">
                         <div className="flex justify-between text-xs mb-0.5"><span className="text-slate-600 truncate pr-2">${label}</span><span className="font-bold text-slate-700 whitespace-nowrap">${sufixo || valor}</span></div>
@@ -6400,21 +6421,37 @@ HTML_PAGE = """
                                 ${tempoFases.erro ? html`<div className="text-xs text-amber-600 mb-2">⚠️ ${tempoFases.erro}</div>` : ''}
                                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
                                     ${tempoFases.resumo.map(s => html`
-                                        <div key=${s.fase} className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                                        <button key=${s.fase} type="button" onClick=${() => setTfFase(String(tfFase) === String(s.faseCodigo) ? 'todas' : String(s.faseCodigo))} className=${`text-left rounded-lg p-3 border transition ${String(tfFase) === String(s.faseCodigo) ? 'bg-amber-100 border-amber-400 ring-1 ring-amber-400' : 'bg-amber-50 border-amber-200 hover:border-amber-300'}`} title="Clique para filtrar por esta fase">
                                             <div className="text-xs text-slate-500 uppercase truncate">${s.fase}</div>
                                             <div className="text-2xl font-bold text-amber-700">${s.diasMedio !== null ? s.diasMedio + ' dias' : '—'}</div>
                                             <div className="text-xs text-slate-400">${s.qtd} aberta(s) · máx ${s.diasMax} dias</div>
-                                        </div>
+                                        </button>
                                     `)}
                                 </div>
-                                <div className="flex justify-end mb-2">
-                                    <button onClick=${() => setTempoFasesRaw(!tempoFasesRaw)} className="text-xs text-slate-500 hover:text-slate-700 underline">${tempoFasesRaw ? 'ocultar' : 'mostrar'} datas brutas (conferir mapeamento)</button>
+                                <div className="flex flex-wrap items-center gap-2 mb-2 text-sm">
+                                    <span className="text-xs text-slate-400">Fase:</span>
+                                    ${[['todas', 'Todas'], ['10843780550', '01 Análise'], ['10843780551', '02 Aprovação'], ['10843780552', '03 Preparação']].map(([k, label]) => html`
+                                        <button key=${k} onClick=${() => setTfFase(k)} className=${`px-2.5 py-1 rounded-lg text-xs font-medium transition ${String(tfFase) === k ? 'bg-amber-600 text-white' : 'bg-white border border-slate-300 text-slate-600 hover:bg-slate-100'}`}>${label}</button>
+                                    `)}
+                                    <span className="text-xs text-slate-400 ml-2">Parados:</span>
+                                    ${[['todos', 'Todos'], ['7', '≥ 7 dias'], ['15', '≥ 15 dias']].map(([k, label]) => html`
+                                        <button key=${k} onClick=${() => setTfDias(k)} className=${`px-2.5 py-1 rounded-lg text-xs font-medium transition ${tfDias === k ? 'bg-amber-600 text-white' : 'bg-white border border-slate-300 text-slate-600 hover:bg-slate-100'}`}>${label}</button>
+                                    `)}
+                                    <select value=${tfOrdem} onChange=${e => setTfOrdem(e.target.value)} className="text-xs p-1.5 border border-slate-300 rounded bg-white ml-2" title="Ordenação">
+                                        <option value="dias">Mais parados primeiro</option>
+                                        <option value="recentes">Mais recentes primeiro</option>
+                                    </select>
+                                    <input type="text" value=${tfBusca} onChange=${e => setTfBusca(e.target.value)} placeholder="Buscar nº ou descrição" className="p-1.5 border border-slate-300 rounded text-xs flex-1 min-w-[140px]" />
+                                </div>
+                                <div className="flex justify-between items-center mb-2 text-xs text-slate-400">
+                                    <span>Mostrando ${tfItens.length} de ${tfTotal}${(tfFase !== 'todas' || tfDias !== 'todos' || tfBusca) ? html` · <button onClick=${() => { setTfFase('todas'); setTfDias('todos'); setTfBusca(''); }} className="text-amber-600 hover:underline">limpar filtros</button>` : ''}</span>
+                                    <button onClick=${() => setTempoFasesRaw(!tempoFasesRaw)} className="text-slate-500 hover:text-slate-700 underline">${tempoFasesRaw ? 'ocultar' : 'mostrar'} datas brutas (conferir mapeamento)</button>
                                 </div>
                                 <div className="overflow-x-auto rounded border border-slate-200 max-h-[400px] overflow-y-auto">
                                     <table className="min-w-full text-sm">
                                         <thead className="bg-slate-100 text-slate-700 sticky top-0"><tr><th className="p-2 text-left">Nº</th><th className="p-2 text-left">Descrição</th><th className="p-2 text-left">Fase atual</th><th className="p-2 text-left">Entrada</th><th className="p-2 text-right">Dias</th>${tempoFasesRaw ? html`<th className="p-2 text-left">Datas brutas (fasesStatus)</th>` : ''}</tr></thead>
                                         <tbody className="divide-y divide-slate-100">
-                                            ${(tempoFases.items || []).length === 0 ? html`<tr><td colSpan=${tempoFasesRaw ? 6 : 5} className="p-3 text-center text-slate-400">Nenhuma oportunidade aberta nas fases monitoradas.</td></tr>` : tempoFases.items.map(it => html`<tr key=${it.nCodOp} className="hover:bg-slate-50">
+                                            ${tfItens.length === 0 ? html`<tr><td colSpan=${tempoFasesRaw ? 6 : 5} className="p-3 text-center text-slate-400">${tfTotal === 0 ? 'Nenhuma oportunidade aberta nas fases monitoradas.' : 'Nenhuma oportunidade com os filtros atuais.'}</td></tr>` : tfItens.map(it => html`<tr key=${it.nCodOp} className="hover:bg-slate-50">
                                                 <td className="p-2 text-xs font-mono whitespace-nowrap">${it.cNumOp || '—'}</td>
                                                 <td className="p-2 text-xs max-w-xs truncate" title=${it.descricao}>${it.descricao || '—'}</td>
                                                 <td className="p-2 text-xs">${it.faseNome}</td>
