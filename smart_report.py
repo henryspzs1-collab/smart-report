@@ -7054,6 +7054,29 @@ HTML_PAGE = """
                             else alert('Erro: ' + (d.error || 'falha ao salvar'));
                         } catch (e) { alert('Erro de rede: ' + (e.message || e)); }
                     };
+                    // Controles de substituição (nº de série velho/novo + foto) — reaproveitados
+                    // na seção Peças E no painel de Execução & Teste (preenchidos no momento da troca).
+                    const substituicaoControles = (p, i) => html`
+                        <div className="mt-3 pt-3 border-t border-dashed border-slate-300">
+                            <label className="flex items-center gap-2 cursor-pointer text-sm font-medium text-slate-700">
+                                <input type="checkbox" checked=${p.substituida || false} onChange=${e => updatePart(i, { substituida: e.target.checked })} className="w-4 h-4 text-amber-600" />
+                                <i className="ph-bold ph-arrows-left-right text-amber-600"></i> Peça substituída — registrar troca (nº de série)
+                            </label>
+                            ${p.substituida && html`
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+                                    <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                                        <div className="text-xs font-bold text-red-700 uppercase mb-1"><i className="ph-fill ph-wrench"></i> Peça retirada (velha)</div>
+                                        <input type="text" placeholder="Nº de série da peça velha" value=${p.serialAntigo || ''} onChange=${e => updatePart(i, { serialAntigo: e.target.value })} className="w-full p-1.5 border border-slate-300 rounded text-sm mb-2 font-mono" />
+                                        ${p.fotoSerialAntigo ? html`<div className="relative"><img src=${p.fotoSerialAntigo} className="w-full h-28 object-contain border rounded bg-white" /><button onClick=${() => updatePart(i, { fotoSerialAntigo: null })} className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-6 h-6 text-xs"><i className="ph ph-x"></i></button></div>` : html`<label className="flex items-center justify-center gap-1 text-xs bg-white border border-dashed border-red-300 rounded p-3 cursor-pointer text-red-600 hover:bg-red-50"><i className="ph-bold ph-camera"></i> Foto do nº de série<input type="file" accept="image/*" capture="environment" className="hidden" onChange=${e => setPartPhoto(i, 'fotoSerialAntigo', e.target.files[0])} /></label>`}
+                                    </div>
+                                    <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3">
+                                        <div className="text-xs font-bold text-emerald-700 uppercase mb-1"><i className="ph-fill ph-seal-check"></i> Peça nova (instalada)</div>
+                                        <input type="text" placeholder="Nº de série da peça nova" value=${p.serialNovo || ''} onChange=${e => updatePart(i, { serialNovo: e.target.value })} className="w-full p-1.5 border border-slate-300 rounded text-sm mb-2 font-mono" />
+                                        ${p.fotoSerialNovo ? html`<div className="relative"><img src=${p.fotoSerialNovo} className="w-full h-28 object-contain border rounded bg-white" /><button onClick=${() => updatePart(i, { fotoSerialNovo: null })} className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-6 h-6 text-xs"><i className="ph ph-x"></i></button></div>` : html`<label className="flex items-center justify-center gap-1 text-xs bg-white border border-dashed border-emerald-300 rounded p-3 cursor-pointer text-emerald-600 hover:bg-emerald-50"><i className="ph-bold ph-camera"></i> Foto do nº de série<input type="file" accept="image/*" capture="environment" className="hidden" onChange=${e => setPartPhoto(i, 'fotoSerialNovo', e.target.files[0])} /></label>`}
+                                    </div>
+                                </div>
+                            `}
+                        </div>`;
                     const addService = () => updateOs({ services: [...(currentOs.services || []), { omieServiceId: null, code: '', description: '', quantity: 1, unitPrice: 0 }] });
                     const removeService = (i) => updateOs({ services: currentOs.services.filter((_, idx) => idx !== i) });
                     const addPart = () => updateOs({ parts: [...(currentOs.parts || []), { omieProductId: null, code: '', description: '', quantity: 1, unitPrice: 0 }] });
@@ -7197,6 +7220,29 @@ HTML_PAGE = """
                                             ${currentOs.observations ? html`<div className="mt-3"><div className="font-semibold text-slate-700 mb-1 text-sm"><i className="ph-bold ph-note"></i> Observações</div><div className="text-sm text-slate-600 whitespace-pre-wrap">${currentOs.observations}</div></div>` : ''}
                                         `}
                                     </div>
+
+                                    ${(currentOs.parts || []).length > 0 && execEstado !== 'aprovado' && html`
+                                        <div className="border border-slate-200 rounded-lg p-4 mb-4">
+                                            <div className="flex items-center justify-between mb-2 flex-wrap gap-1">
+                                                <div className="text-sm font-semibold text-slate-700"><i className="ph-bold ph-arrows-left-right text-amber-600"></i> Registrar peças trocadas</div>
+                                                <span className="text-xs text-slate-400">Marque a peça substituída e informe o nº de série (se houver) + foto.</span>
+                                            </div>
+                                            <div className="space-y-2">
+                                                ${currentOs.parts.map((p, i) => html`
+                                                    <div key=${i} className="bg-white border border-slate-200 rounded-lg p-3">
+                                                        <div className="text-sm font-medium text-slate-700">${p.description || p.code || 'peça'}${p.quantity > 1 ? ` (${p.quantity}x)` : ''}</div>
+                                                        ${substituicaoControles(p, i)}
+                                                    </div>
+                                                `)}
+                                            </div>
+                                            ${currentOs.parts.some(p => p.substituida) && html`
+                                                <div className="mt-3 flex items-center justify-between gap-2 bg-amber-50 border border-amber-200 rounded-lg p-3">
+                                                    <span className="text-xs text-amber-800">Registros de troca (nº de série + fotos) ficam salvos para rastreabilidade de garantia.</span>
+                                                    <button onClick=${salvarSubstituicoes} className="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg font-medium text-sm whitespace-nowrap"><i className="ph-bold ph-floppy-disk"></i> Salvar substituições</button>
+                                                </div>
+                                            `}
+                                        </div>
+                                    `}
 
                                     ${(execEstado === 'a_executar' || execEstado === 'reprovado') && html`
                                         ${execEstado === 'reprovado' && html`<div className="bg-red-50 border border-red-200 text-red-700 p-3 rounded-lg text-sm mb-3"><b>Teste anterior REPROVADO.</b> Motivo: ${currentOs.execMotivoReprova || '—'}. Refaça a execução e teste novamente.</div>`}
@@ -7348,26 +7394,7 @@ HTML_PAGE = """
                                                             <input type="number" min="0" step="0.01" value=${p.unitPrice} onChange=${e => updatePart(i, { unitPrice: e.target.value })} className="w-24 p-1.5 border border-slate-300 rounded text-sm" disabled=${isLocked} />
                                                             <div className="ml-auto text-sm font-bold text-slate-700">= R$ ${((parseFloat(p.quantity)||0) * (parseFloat(p.unitPrice)||0)).toFixed(2)}</div>
                                                         </div>
-                                                        <div className="mt-3 pt-3 border-t border-dashed border-slate-300">
-                                                            <label className="flex items-center gap-2 cursor-pointer text-sm font-medium text-slate-700">
-                                                                <input type="checkbox" checked=${p.substituida || false} onChange=${e => updatePart(i, { substituida: e.target.checked })} className="w-4 h-4 text-amber-600" />
-                                                                <i className="ph-bold ph-arrows-left-right text-amber-600"></i> Peça substituída — registrar troca (nº de série)
-                                                            </label>
-                                                            ${p.substituida && html`
-                                                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
-                                                                    <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-                                                                        <div className="text-xs font-bold text-red-700 uppercase mb-1"><i className="ph-fill ph-wrench"></i> Peça retirada (velha)</div>
-                                                                        <input type="text" placeholder="Nº de série da peça velha" value=${p.serialAntigo || ''} onChange=${e => updatePart(i, { serialAntigo: e.target.value })} className="w-full p-1.5 border border-slate-300 rounded text-sm mb-2 font-mono" />
-                                                                        ${p.fotoSerialAntigo ? html`<div className="relative"><img src=${p.fotoSerialAntigo} className="w-full h-28 object-contain border rounded bg-white" /><button onClick=${() => updatePart(i, { fotoSerialAntigo: null })} className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-6 h-6 text-xs"><i className="ph ph-x"></i></button></div>` : html`<label className="flex items-center justify-center gap-1 text-xs bg-white border border-dashed border-red-300 rounded p-3 cursor-pointer text-red-600 hover:bg-red-50"><i className="ph-bold ph-camera"></i> Foto do nº de série<input type="file" accept="image/*" capture="environment" className="hidden" onChange=${e => setPartPhoto(i, 'fotoSerialAntigo', e.target.files[0])} /></label>`}
-                                                                    </div>
-                                                                    <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3">
-                                                                        <div className="text-xs font-bold text-emerald-700 uppercase mb-1"><i className="ph-fill ph-seal-check"></i> Peça nova (instalada)</div>
-                                                                        <input type="text" placeholder="Nº de série da peça nova" value=${p.serialNovo || ''} onChange=${e => updatePart(i, { serialNovo: e.target.value })} className="w-full p-1.5 border border-slate-300 rounded text-sm mb-2 font-mono" />
-                                                                        ${p.fotoSerialNovo ? html`<div className="relative"><img src=${p.fotoSerialNovo} className="w-full h-28 object-contain border rounded bg-white" /><button onClick=${() => updatePart(i, { fotoSerialNovo: null })} className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-6 h-6 text-xs"><i className="ph ph-x"></i></button></div>` : html`<label className="flex items-center justify-center gap-1 text-xs bg-white border border-dashed border-emerald-300 rounded p-3 cursor-pointer text-emerald-600 hover:bg-emerald-50"><i className="ph-bold ph-camera"></i> Foto do nº de série<input type="file" accept="image/*" capture="environment" className="hidden" onChange=${e => setPartPhoto(i, 'fotoSerialNovo', e.target.files[0])} /></label>`}
-                                                                    </div>
-                                                                </div>
-                                                            `}
-                                                        </div>
+                                                        ${substituicaoControles(p, i)}
                                                     </div>
                                                     ${!isLocked && html`<button onClick=${() => removePart(i)} className="text-red-500 hover:bg-red-50 p-2 rounded"><i className="ph-bold ph-trash"></i></button>`}
                                                 </div>
