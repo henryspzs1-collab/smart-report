@@ -8080,28 +8080,57 @@ _ICON_CACHE = {}
 
 
 def _icon_png(size):
-    if size in _ICON_CACHE:
-        return _ICON_CACHE[size]
+    """Ícone do PWA/favicon. Usa a logo da Biodron (globalConfig.logo) centralizada
+    sobre o fundo escuro da marca, com zona de segurança (maskable). Cai pra bateria
+    desenhada se não houver logo. Cache por (tamanho, logo) — troca de logo invalida."""
     from PIL import Image, ImageDraw
     S = size
-    img = Image.new('RGB', (S, S), (30, 64, 175))  # #1e40af (azul Biodron)
-    d = ImageDraw.Draw(img)
-    # Corpo da bateria (branco, arredondado)
-    bx0, by0, bx1, by1 = int(0.20 * S), int(0.36 * S), int(0.72 * S), int(0.64 * S)
-    d.rounded_rectangle([bx0, by0, bx1, by1], radius=int(0.05 * S), fill=(255, 255, 255))
-    # Terminal (+)
-    d.rounded_rectangle([bx1, int(0.45 * S), int(0.78 * S), int(0.55 * S)], radius=int(0.02 * S), fill=(255, 255, 255))
-    # 3 barras de carga (azul) dentro do corpo
-    pad = int(0.025 * S)
-    inner_w = (bx1 - bx0) - 2 * pad
-    bar_w = int((inner_w - 2 * pad) / 3)
-    for i in range(3):
-        x0 = bx0 + pad + i * (bar_w + pad)
-        d.rounded_rectangle([x0, by0 + pad, x0 + bar_w, by1 - pad], radius=int(0.01 * S), fill=(30, 64, 175))
+    BG = (15, 23, 42)  # #0f172a (slate-900, mesmo fundo do header onde a logo já aparece)
+
+    logo_uri = None
+    try:
+        logo_uri = (load_data().get('globalConfig') or {}).get('logo')
+    except Exception:
+        logo_uri = None
+
+    cache_key = (size, hash(logo_uri or ''))
+    if cache_key in _ICON_CACHE:
+        return _ICON_CACHE[cache_key]
+
+    img = Image.new('RGBA', (S, S), BG + (255,))
+    pasted = False
+    if logo_uri and ',' in logo_uri:
+        try:
+            raw = base64.b64decode(logo_uri.split(',', 1)[1])
+            lg = Image.open(io.BytesIO(raw)).convert('RGBA')
+            safe = int(S * 0.72)  # zona de segurança ~14% de cada lado (ícone maskable)
+            lw, lh = lg.size
+            ratio = min(safe / lw, safe / lh)
+            nw, nh = max(1, int(lw * ratio)), max(1, int(lh * ratio))
+            lg = lg.resize((nw, nh), Image.LANCZOS)
+            img.alpha_composite(lg, ((S - nw) // 2, (S - nh) // 2))
+            pasted = True
+        except Exception:
+            pasted = False
+
+    if not pasted:
+        # Fallback: bateria desenhada (azul Biodron) quando não há logo cadastrada.
+        img = Image.new('RGBA', (S, S), (30, 64, 175, 255))
+        d = ImageDraw.Draw(img)
+        bx0, by0, bx1, by1 = int(0.20 * S), int(0.36 * S), int(0.72 * S), int(0.64 * S)
+        d.rounded_rectangle([bx0, by0, bx1, by1], radius=int(0.05 * S), fill=(255, 255, 255))
+        d.rounded_rectangle([bx1, int(0.45 * S), int(0.78 * S), int(0.55 * S)], radius=int(0.02 * S), fill=(255, 255, 255))
+        pad = int(0.025 * S)
+        inner_w = (bx1 - bx0) - 2 * pad
+        bar_w = int((inner_w - 2 * pad) / 3)
+        for i in range(3):
+            x0 = bx0 + pad + i * (bar_w + pad)
+            d.rounded_rectangle([x0, by0 + pad, x0 + bar_w, by1 - pad], radius=int(0.01 * S), fill=(30, 64, 175))
+
     out = io.BytesIO()
-    img.save(out, format='PNG')
-    _ICON_CACHE[size] = out.getvalue()
-    return _ICON_CACHE[size]
+    img.convert('RGB').save(out, format='PNG')
+    _ICON_CACHE[cache_key] = out.getvalue()
+    return _ICON_CACHE[cache_key]
 
 
 @app.route('/manifest.webmanifest')
