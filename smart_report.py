@@ -641,9 +641,17 @@ def get_data():
         }
         save_data(full_data)
 
+    # PERFORMANCE da carga inicial: NÃO enviar osDrafts aqui.
+    # Os osDrafts são o maior acumulador da base (cada OS guarda parts[] com fotos
+    # base64 e a lista cresce sem limite), mas a carga inicial do app NÃO os consome
+    # — eles vêm do endpoint dedicado GET /api/os (fetchOsDrafts). O autosave também
+    # nunca reenvia osDrafts (o merge do POST /api/data os preserva). Logo, omiti-los
+    # aqui é seguro e enxuga bastante o payload do "Carregando dados do usuário".
+    user_state = {k: v for k, v in full_data['userStates'][user].items() if k != 'osDrafts'}
+
     return jsonify({
         "globalConfig": full_data['globalConfig'],
-        "userState": full_data['userStates'][user],
+        "userState": user_state,
         "role": full_data['users'][user]['role']
     })
 
