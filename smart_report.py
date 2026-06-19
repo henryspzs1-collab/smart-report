@@ -1903,7 +1903,7 @@ def crm_mover_fase(n_cod_op):
         return jsonify({"error": str(e)}), e.status
 
 
-@app.route('/api/crm/oportunidade/<crm_op>/itens-faturamento', methods=['GET'])
+@app.route('/api/crm/oportunidade/<path:crm_op>/itens-faturamento', methods=['GET'])
 def crm_itens_faturamento(crm_op):
     """Itens (produtos + serviços) que o técnico montou no Smart Report para uma
     oportunidade, já formatados para o Power Automate Desktop DIGITAR no Ticket do CRM
