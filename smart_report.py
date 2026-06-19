@@ -1916,13 +1916,19 @@ def crm_itens_faturamento(crm_op):
     if err:
         return err
     alvo = str(crm_op).strip()
-    draft = None
-    for owner, d in _all_filial_drafts(full_data, user):
-        if str(d.get('crmOpNum') or '').strip() == alvo or str(d.get('crmOpId') or '').strip() == alvo:
-            draft = d
-            break
-    if not draft:
+    # Pode haver VÁRIOS drafts pra mesma oportunidade (ex.: um 'sent' com itens + um
+    # rascunho vazio). Pega o que tem MAIS itens (produtos+serviços); desempata pelo
+    # mais recente (updatedAt). Assim o PAD nunca recebe a OS vazia por engano.
+    candidatos = [
+        d for owner, d in _all_filial_drafts(full_data, user)
+        if str(d.get('crmOpNum') or '').strip() == alvo or str(d.get('crmOpId') or '').strip() == alvo
+    ]
+    if not candidatos:
         return jsonify({"error": "Nenhuma OS do Smart Report vinculada a essa oportunidade."}), 404
+    draft = max(candidatos, key=lambda d: (
+        len(d.get('parts') or []) + len(d.get('services') or []),
+        d.get('updatedAt') or '',
+    ))
 
     produtos = []
     for p in (draft.get('parts') or []):
