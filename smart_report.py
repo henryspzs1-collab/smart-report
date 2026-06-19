@@ -649,8 +649,18 @@ def get_data():
     # aqui é seguro e enxuga bastante o payload do "Carregando dados do usuário".
     user_state = {k: v for k, v in full_data['userStates'][user].items() if k != 'osDrafts'}
 
+    # PERFORMANCE: também NÃO enviar o base64 dos diagramas dos modelos aqui.
+    # Os diagramas (imagens base64) viajam em TODA carga inicial e podem somar vários MB.
+    # Mandamos só id+name (estrutura), e as imagens são carregadas DEPOIS, sem bloquear o
+    # "Carregando dados", pelo endpoint GET /api/diagrams. (O merge do POST preserva o base64.)
+    gc = full_data['globalConfig']
+    gc_light = {**gc, "models": [
+        {**m, "diagrams": [{k: v for k, v in d.items() if k != 'imageBase64'} for d in (m.get('diagrams') or [])]}
+        for m in (gc.get('models') or [])
+    ]}
+
     return jsonify({
-        "globalConfig": full_data['globalConfig'],
+        "globalConfig": gc_light,
         "userState": user_state,
         "role": full_data['users'][user]['role']
     })
@@ -681,10 +691,44 @@ def update_data():
 
     # Apenas Admin pode atualizar as configurações globais (Modelos, Logo, Cabeçalhos)
     if role == 'admin' and 'globalConfig' in payload:
-        full_data['globalConfig'] = payload['globalConfig']
+        new_gc = payload['globalConfig'] or {}
+        # MERGE-PRESERVAÇÃO dos diagramas (mesma lógica de segurança dos osDrafts):
+        # o GET /api/data não envia o base64 dos diagramas; se um autosave do admin
+        # disparar ANTES das imagens carregarem (via /api/diagrams), o payload viria com
+        # diagramas SEM imageBase64 → apagaria as imagens. Aqui, todo diagrama que chega
+        # sem imageBase64 recupera o base64 já salvo (casado por id de modelo+diagrama).
+        old_models = {m.get('id'): m for m in (full_data.get('globalConfig', {}).get('models') or [])}
+        for m in (new_gc.get('models') or []):
+            old_m = old_models.get(m.get('id'))
+            if not old_m:
+                continue
+            old_diags = {d.get('id'): d for d in (old_m.get('diagrams') or [])}
+            for d in (m.get('diagrams') or []):
+                if not d.get('imageBase64'):
+                    prev = old_diags.get(d.get('id'))
+                    if prev and prev.get('imageBase64'):
+                        d['imageBase64'] = prev['imageBase64']
+        full_data['globalConfig'] = new_gc
 
     save_data(full_data)
     return jsonify({"status": "success"})
+
+
+@app.route('/api/diagrams', methods=['GET'])
+def get_diagrams():
+    """Imagens base64 dos diagramas, por modelo. Carregado APÓS o /api/data (não bloqueia
+    a carga inicial). Retorna { modelId: [{id, imageBase64}, ...] }."""
+    full_data = load_data()
+    user = _resolve_token(full_data, request.headers.get('Authorization'))
+    if not user:
+        return jsonify({"error": "Não autorizado"}), 401
+    out = {}
+    for m in (full_data.get('globalConfig', {}).get('models') or []):
+        out[m.get('id')] = [
+            {"id": d.get('id'), "imageBase64": d.get('imageBase64')}
+            for d in (m.get('diagrams') or [])
+        ]
+    return jsonify(out)
 
 
 def _set_omie_context(full_data, username):
@@ -1859,6 +1903,59 @@ def crm_mover_fase(n_cod_op):
         return jsonify({"error": str(e)}), e.status
 
 
+@app.route('/api/crm/oportunidade/<crm_op>/itens-faturamento', methods=['GET'])
+def crm_itens_faturamento(crm_op):
+    """Itens (produtos + serviços) que o técnico montou no Smart Report para uma
+    oportunidade, já formatados para o Power Automate Desktop DIGITAR no Ticket do CRM
+    ('Produtos/Serviços associados à Oportunidade') e em seguida faturar nativamente.
+
+    Localiza o rascunho de OS da filial pela crmOpNum (ex.: '2026/00194') OU pelo
+    crmOpId. É só LEITURA — não cria nada no Omie (o PAD faz o faturamento na tela).
+    """
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    alvo = str(crm_op).strip()
+    draft = None
+    for owner, d in _all_filial_drafts(full_data, user):
+        if str(d.get('crmOpNum') or '').strip() == alvo or str(d.get('crmOpId') or '').strip() == alvo:
+            draft = d
+            break
+    if not draft:
+        return jsonify({"error": "Nenhuma OS do Smart Report vinculada a essa oportunidade."}), 404
+
+    produtos = []
+    for p in (draft.get('parts') or []):
+        produtos.append({
+            "codigo": p.get('code') or '',
+            "descricao": p.get('description') or '',
+            "quantidade": float(p.get('quantity') or 1),
+            "valorUnitario": float(p.get('unitPrice') or 0),
+            "omieProductId": p.get('omieProductId'),
+        })
+    servicos = []
+    for s in (draft.get('services') or []):
+        servicos.append({
+            "codigo": s.get('code') or '',
+            "descricao": s.get('description') or '',
+            "quantidade": float(s.get('quantity') or 1),
+            "valorUnitario": float(s.get('unitPrice') or 0),
+        })
+    return jsonify({
+        "crmOpNum": draft.get('crmOpNum'),
+        "crmOpId": draft.get('crmOpId'),
+        "osId": draft.get('id'),
+        "cliente": (draft.get('client') or {}).get('name') or '',
+        "documentoCliente": (draft.get('client') or {}).get('document') or '',
+        "produtos": produtos,
+        "servicos": servicos,
+        "qtdProdutos": len(produtos),
+        "qtdServicos": len(servicos),
+        "totalProdutos": round(sum(p['quantidade'] * p['valorUnitario'] for p in produtos), 2),
+        "totalServicos": round(sum(s['quantidade'] * s['valorUnitario'] for s in servicos), 2),
+    })
+
+
 @app.route('/api/omie/os/abertas', methods=['GET'])
 def omie_os_abertas():
     """Lista OSes do Omie que ainda não foram faturadas/canceladas, pra técnico importar e editar."""
@@ -2519,18 +2616,49 @@ def _appkey_filial_match(full_data, app_key):
     return None
 
 
+def _strip_part_photos(draft):
+    """Cópia rasa do draft SEM as fotos base64 das peças (fotoSerialAntigo/Novo),
+    pra deixar a LISTA de OS leve. As fotos só interessam ao abrir uma OS específica
+    (carregadas via GET /api/os/<id>). Não muta o draft original."""
+    parts = draft.get('parts')
+    if not isinstance(parts, list) or not parts:
+        return draft
+    novas = []
+    pesado = False
+    for p in parts:
+        if isinstance(p, dict) and (p.get('fotoSerialAntigo') or p.get('fotoSerialNovo')):
+            pesado = True
+            novas.append({**p, 'fotoSerialAntigo': '', 'fotoSerialNovo': ''})
+        else:
+            novas.append(p)
+    return {**draft, 'parts': novas} if pesado else draft
+
+
 @app.route('/api/os', methods=['GET'])
 def os_list():
     user, full_data, err = _require_user()
     if err:
         return err
     # Painel compartilhado: todas as OS da filial, com nome de quem preencheu.
+    # Lista ENXUTA: sem as fotos base64 das peças (vêm no GET /api/os/<id> ao abrir).
     out = []
     for owner, d in _all_filial_drafts(full_data, user):
-        out.append({**d, "responsavel": _responsavel_nome(full_data, d.get('createdBy') or owner)})
+        out.append({**_strip_part_photos(d), "responsavel": _responsavel_nome(full_data, d.get('createdBy') or owner)})
     # Ordena por data de criação (mais recente primeiro)
     out.sort(key=lambda x: x.get('createdAt') or '', reverse=True)
     return jsonify(out)
+
+
+@app.route('/api/os/<os_id>', methods=['GET'])
+def os_get(os_id):
+    """OS completa (com as fotos base64 das peças). Usado ao ABRIR uma OS da lista."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    owner, d = _find_filial_draft(full_data, user, os_id)
+    if not d:
+        return jsonify({"error": "Rascunho não encontrado"}), 404
+    return jsonify({**d, "responsavel": _responsavel_nome(full_data, d.get('createdBy') or owner)})
 
 
 @app.route('/api/os', methods=['POST'])
@@ -4521,6 +4649,22 @@ HTML_PAGE = """
 
                         if(loadedModels.length > 0) setEditingModelId(loadedModels[0].id);
                         setIsLoaded(true);
+
+                        // Carrega as imagens dos diagramas DEPOIS (não bloqueia a carga inicial)
+                        // e mescla o base64 de volta nos modelos. Ver GET /api/diagrams.
+                        fetch('/api/diagrams', { headers: { 'Authorization': auth.token } })
+                            .then(r => r.ok ? r.json() : null)
+                            .then(diagMap => {
+                                if (!diagMap) return;
+                                setModels(prev => prev.map(m => ({
+                                    ...m,
+                                    diagrams: (m.diagrams || []).map(d => {
+                                        const found = (diagMap[m.id] || []).find(x => x.id === d.id);
+                                        return found && found.imageBase64 ? { ...d, imageBase64: found.imageBase64 } : d;
+                                    })
+                                })));
+                            })
+                            .catch(() => {});
                     })
                     .catch(() => handleLogout());
             }, [auth]);
@@ -4624,6 +4768,17 @@ HTML_PAGE = """
             const fetchOsDrafts = () => {
                 fetch('/api/os', { headers: { 'Authorization': auth.token } })
                     .then(r => r.json()).then(d => { if(Array.isArray(d)) setOsDrafts(d); });
+            };
+            // Abre uma OS da lista: mostra na hora (lista é enxuta, sem fotos de peça)
+            // e em seguida troca pela versão COMPLETA (com fotos) vinda do GET /api/os/<id>.
+            const abrirOsCompleta = (osParcial) => {
+                if (!osParcial) { setCurrentOs(null); return; }
+                setCurrentOs(osParcial);
+                if (!osParcial.id) return;
+                fetch(`/api/os/${osParcial.id}`, { headers: { 'Authorization': auth.token } })
+                    .then(r => r.ok ? r.json() : null)
+                    .then(full => { if (full && full.id) setCurrentOs(prev => (prev && prev.id === full.id) ? full : prev); })
+                    .catch(() => {});
             };
             const clearOmieCache = () => {
                 if (!confirm('Limpar cache Omie? A próxima busca vai puxar tudo de novo do Omie (pode demorar).')) return;
@@ -7678,7 +7833,7 @@ HTML_PAGE = """
                                                     <td className="p-2 text-xs text-right">R$ ${parseFloat(o.nValorTotal || 0).toFixed(2)}</td>
                                                     <td className="p-2 text-right">
                                                         ${ja ? html`
-                                                            <button onClick=${() => setCurrentOs(ja)} className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-3 py-1 rounded text-xs font-medium">Abrir</button>
+                                                            <button onClick=${() => abrirOsCompleta(ja)} className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-3 py-1 rounded text-xs font-medium">Abrir</button>
                                                         ` : html`
                                                             <button onClick=${() => importarOsDoOmie(o.nCodOS)} className="bg-amber-600 hover:bg-amber-700 text-white px-3 py-1 rounded text-xs font-medium"><i className="ph-bold ph-download-simple"></i> Importar</button>
                                                         `}
@@ -7735,7 +7890,7 @@ HTML_PAGE = """
                                                         ${o.omieStatus ? html`<div className=${`mt-1 text-xs font-bold rounded px-2 py-0.5 inline-block ${o.omieStatus === 'faturada' ? 'bg-emerald-100 text-emerald-700' : (o.omieStatus === 'cancelada' || o.omieStatus === 'excluida') ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'}`} title=${o.omieEventAt ? 'Omie em ' + new Date(o.omieEventAt).toLocaleString('pt-BR') : ''}>Omie: ${o.omieStatus}</div>` : ''}
                                                     </td>
                                                     <td className="p-3 text-right whitespace-nowrap">
-                                                        <button onClick=${() => setCurrentOs(o)} className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-2 py-1 rounded text-xs font-medium mr-1">${o.status === 'sent' ? 'Ver' : 'Editar'}</button>
+                                                        <button onClick=${() => abrirOsCompleta(o)} className="bg-blue-50 hover:bg-blue-100 text-blue-700 px-2 py-1 rounded text-xs font-medium mr-1">${o.status === 'sent' ? 'Ver' : 'Editar'}</button>
                                                         ${o.status !== 'sent' && html`<button onClick=${() => deleteOs(o.id)} className="bg-red-50 hover:bg-red-100 text-red-700 px-2 py-1 rounded text-xs font-medium"><i className="ph-bold ph-trash"></i></button>`}
                                                     </td>
                                                 </tr>
