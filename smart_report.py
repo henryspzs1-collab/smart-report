@@ -4095,8 +4095,10 @@ def os_anexar_fotos(os_id):
     owner, draft = _find_filial_draft(full_data, user, os_id)
     if not draft:
         return jsonify({"error": "Rascunho não encontrado"}), 404
-    if not draft.get('omieOsId'):
-        return jsonify({"error": "OS precisa estar enviada/sincronizada ao Omie antes de anexar fotos."}), 400
+    # Com "faturar pelo robô" não há OS no Omie -> anexa as fotos na OPORTUNIDADE.
+    robo_sem_os = bool(draft.get('crmOpId')) and not draft.get('omieOsId')
+    if not draft.get('omieOsId') and not robo_sem_os:
+        return jsonify({"error": "OS precisa estar enviada/sincronizada ao Omie (ou vinculada a uma oportunidade do CRM)."}), 400
 
     body = request.json or {}
     fotos = body.get('photos') or []
@@ -4140,7 +4142,7 @@ def os_anexar_fotos(os_id):
     # Pra anexo Omie, o conteúdo precisa ser zip + base64.
     # Como já é um zip, faz outro envelope zip que contém o zip de fotos.
     outer = io.BytesIO()
-    filename = f"fotos_OS_{draft.get('omieOsNumber') or os_id}.zip"
+    filename = ("fotos_%s.zip" % (draft.get('omieOsNumber') or draft.get('crmOpNum') or os_id)).replace('/', '-')
     with zipfile.ZipFile(outer, 'w', zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(filename, zip_content)
     zip_content = None
@@ -4153,30 +4155,34 @@ def os_anexar_fotos(os_id):
     print(f"[ANEXAR-FOTOS] b64_size={len(outer_b64)} md5={md5_hash}", flush=True)
 
     cod_int = f"fts_{os_id}_{int(datetime.utcnow().timestamp())}"[:20]
-    try:
-        omie_call('/geral/anexo/', 'IncluirAnexo', {
-            "cCodIntAnexo": cod_int,
-            "cTabela": "ordem-servico",
-            "nId": draft['omieOsId'],
-            "cNomeArquivo": filename,
-            "cTipoArquivo": "zip",
-            "cArquivo": outer_b64,
-            "cMd5": md5_hash
-        })
-        draft['fotosAnexadas'] = True
-        draft['fotosAnexadasAt'] = datetime.utcnow().isoformat() + "Z"
-        draft['fotosCount'] = fotos_count
-    except OmieError as e:
-        return jsonify({"error": str(e)}), e.status
+    # Anexa na OS (se existir no Omie).
+    if draft.get('omieOsId'):
+        try:
+            omie_call('/geral/anexo/', 'IncluirAnexo', {
+                "cCodIntAnexo": cod_int,
+                "cTabela": "ordem-servico",
+                "nId": draft['omieOsId'],
+                "cNomeArquivo": filename,
+                "cTipoArquivo": "zip",
+                "cArquivo": outer_b64,
+                "cMd5": md5_hash
+            })
+        except OmieError as e:
+            return jsonify({"error": str(e)}), e.status
 
-    # Se veio de oportunidade do CRM, anexa as fotos NA OPORTUNIDADE também.
+    # Anexa as fotos NA OPORTUNIDADE do CRM (sempre que houver). Sem OS, é o único destino.
     if draft.get('crmOpId'):
         try:
             _incluir_anexo_omie('crm-oportunidades', draft['crmOpId'], filename, 'zip', outer_b64, md5_hash, 'fop')
             draft['fotosAnexadasOp'] = True
         except OmieError as e:
+            if not draft.get('omieOsId'):
+                return jsonify({"error": f"Falha ao anexar fotos na oportunidade: {e}"}), e.status
             draft['crmAnexoWarning'] = f"Fotos anexadas na OS, mas falhou na oportunidade: {e}"
 
+    draft['fotosAnexadas'] = True
+    draft['fotosAnexadasAt'] = datetime.utcnow().isoformat() + "Z"
+    draft['fotosCount'] = fotos_count
     save_data(full_data)
     return jsonify({"success": True, "count": fotos_count})
 
@@ -5338,15 +5344,16 @@ HTML_PAGE = """
 
             const anexarFotosLaudo = async () => {
                 console.log('[anexarFotosLaudo] iniciando', { os: currentOs, fotos: reportImages?.length });
-                if (!currentOs || !currentOs.omieOsId) {
-                    alert('A OS precisa estar enviada/importada do Omie.');
+                if (!currentOs || (!currentOs.omieOsId && !currentOs.crmOpId)) {
+                    alert('A OS precisa estar enviada/importada do Omie (ou vinculada a uma oportunidade).');
                     return;
                 }
                 if (!reportImages || reportImages.length === 0) {
                     alert('Nenhuma foto no laudo atual. Adicione fotos na aba "Preencher Laudo" primeiro.');
                     return;
                 }
-                if (!confirm(`Anexar ${reportImages.length} foto(s) à OS no Omie como ZIP?`)) return;
+                const destinoFotos = currentOs.omieOsId ? 'à OS' : 'à oportunidade';
+                if (!confirm(`Anexar ${reportImages.length} foto(s) ${destinoFotos} no Omie como ZIP?`)) return;
                 alert('Enviando fotos... aguarde.');
 
                 try {
@@ -5752,8 +5759,8 @@ HTML_PAGE = """
                     } catch (e) { erros.push('PDF: ' + (e.message || e)); }
                 }
 
-                // Etapa 3: anexar fotos (apenas se houver fotos)
-                if (reportImages && reportImages.length > 0 && osAtual.omieOsId) {
+                // Etapa 3: anexar fotos (se houver fotos E destino: OS no Omie OU oportunidade)
+                if (reportImages && reportImages.length > 0 && (osAtual.omieOsId || osAtual.crmOpId)) {
                     try {
                         const r3 = await fetch(`/api/os/${osAtual.id}/anexar-fotos`, {
                             method: 'POST',
