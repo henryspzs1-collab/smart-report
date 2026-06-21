@@ -5382,11 +5382,12 @@ HTML_PAGE = """
             };
 
             const anexarLaudoPDF = async () => {
-                if (!currentOs || !currentOs.omieOsId) {
-                    alert('A OS precisa estar enviada/importada do Omie antes de anexar o PDF.');
+                if (!currentOs || (!currentOs.omieOsId && !currentOs.crmOpId)) {
+                    alert('A OS precisa estar enviada/importada do Omie (ou vinculada a uma oportunidade).');
                     return;
                 }
-                if (!confirm('Gerar PDF do laudo no servidor e anexar à OS no Omie?')) return;
+                const destinoPdf = currentOs.omieOsId ? 'à OS' : 'à oportunidade';
+                if (!confirm('Gerar PDF do laudo no servidor e anexar ' + destinoPdf + ' no Omie?')) return;
                 alert('Gerando PDF e enviando... aguarde alguns segundos.');
 
                 // Monta o payload com os dados atuais do laudo
@@ -7685,7 +7686,7 @@ HTML_PAGE = """
                                             <i className="ph-bold ph-paper-plane-tilt"></i> ${currentOs.status === 'imported' ? 'Atualizar OS no Omie' : 'Enviar pro Omie'}
                                         </button>
                                     `}
-                                    ${(isLocked || currentOs.status === 'imported') && currentOs.omieOsId && html`
+                                    ${(isLocked || currentOs.status === 'imported') && (currentOs.omieOsId || currentOs.crmOpId) && html`
                                         <button onClick=${anexarLaudoPDF} className=${`px-4 py-2 rounded font-medium flex items-center gap-1 text-white ${currentOs.pdfAnexado ? 'bg-slate-500 hover:bg-slate-600' : 'bg-purple-600 hover:bg-purple-700'}`}>
                                             <i className="ph-bold ph-paperclip"></i> ${currentOs.pdfAnexado ? 'Re-anexar Laudo' : 'Anexar PDF do Laudo'}
                                         </button>
