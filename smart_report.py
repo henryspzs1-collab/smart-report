@@ -5281,6 +5281,25 @@ HTML_PAGE = """
                     }).catch(() => setProdutoMsg('Erro de conexão'));
             };
 
+            // AUTOCOMPLETE: busca serviços/peças automaticamente conforme digita (debounce
+            // ~0,4s). A lupa continua funcionando como busca manual. Mínimo 2 caracteres.
+            useEffect(() => {
+                const idx = servicoSearch.forIndex;
+                if (idx === null || idx === undefined) return;
+                const q = (servicoSearch.q || '').trim();
+                if (q.length < 2) { setServicoResults([]); setServicoMsg(''); return; }
+                const t = setTimeout(() => searchServicos(q), 400);
+                return () => clearTimeout(t);
+            }, [servicoSearch]);
+            useEffect(() => {
+                const idx = produtoSearch.forIndex;
+                if (idx === null || idx === undefined) return;
+                const q = (produtoSearch.q || '').trim();
+                if (q.length < 2) { setProdutoResults([]); setProdutoMsg(''); return; }
+                const t = setTimeout(() => searchProdutos(q), 400);
+                return () => clearTimeout(t);
+            }, [produtoSearch]);
+
             const createOmieCliente = (data) => {
                 return fetch('/api/omie/clientes', {
                     method: 'POST',
