@@ -1974,6 +1974,49 @@ def crm_itens_faturamento(crm_op):
     })
 
 
+@app.route('/api/faturamento/pendentes', methods=['GET'])
+def faturamento_pendentes():
+    """Ops PRONTAS pra o robô faturar: drafts marcados faturadoPeloRobo=True (o
+    técnico finalizou) e ainda NÃO faturados pelo robô (sem roboFaturadoAt).
+    O 'vigia' local consulta isto e dispara o robô. Só leitura."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    pend = []
+    for owner, d in _all_filial_drafts(full_data, user):
+        if (d.get('faturadoPeloRobo') and not d.get('roboFaturadoAt')
+                and d.get('crmOpNum') and (d.get('parts') or d.get('services'))):
+            pend.append({
+                "osId": d.get('id'),
+                "crmOpNum": d.get('crmOpNum'),
+                "cliente": (d.get('client') or {}).get('name') or '',
+                "qtdProdutos": len(d.get('parts') or []),
+                "qtdServicos": len(d.get('services') or []),
+                "sentAt": d.get('sentAt'),
+            })
+    return jsonify({"pendentes": pend})
+
+
+@app.route('/api/os/<os_id>/robo-faturado', methods=['POST'])
+def os_robo_faturado(os_id):
+    """O robô avisa que faturou esta op (PV/OS gerados no Omie web). Marca
+    roboFaturadoAt pra não disparar de novo. Idempotente."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    owner, draft = _find_filial_draft(full_data, user, os_id)
+    if not draft:
+        return jsonify({"error": "Rascunho não encontrado"}), 404
+    body = request.json or {}
+    draft['roboFaturadoAt'] = datetime.utcnow().isoformat() + "Z"
+    if body.get('pv'):
+        draft['roboPV'] = str(body['pv'])
+    if body.get('os'):
+        draft['roboOS'] = str(body['os'])
+    save_data(full_data)
+    return jsonify({"success": True})
+
+
 @app.route('/api/omie/os/abertas', methods=['GET'])
 def omie_os_abertas():
     """Lista OSes do Omie que ainda não foram faturadas/canceladas, pra técnico importar e editar."""
