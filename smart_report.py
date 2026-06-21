@@ -70,9 +70,16 @@ def _create_session(full_data, username):
 
 
 def _resolve_token(full_data, token):
-    """Token de sessão -> username. None se inválido/expirado."""
+    """Token -> username. Aceita CHAVE DE API permanente (apiTokens, não expira,
+    usada pelo robô de faturamento) OU token de sessão (TTL 30d). None se inválido."""
     if not token:
         return None
+    # 1) Chave de API permanente (robô)
+    api = (full_data.get('apiTokens') or {}).get(token)
+    if api:
+        u = api.get('username')
+        return u if u in full_data.get('users', {}) else None
+    # 2) Token de sessão (TTL 30d)
     s = (full_data.get('sessions') or {}).get(token)
     if not s:
         return None
@@ -708,6 +715,11 @@ def update_data():
                     prev = old_diags.get(d.get('id'))
                     if prev and prev.get('imageBase64'):
                         d['imageBase64'] = prev['imageBase64']
+        # PRESERVA flags que um frontend em cache pode não reenviar (não apagar a flag).
+        if 'faturarPeloRobo' not in new_gc:
+            prev_flag = (full_data.get('globalConfig') or {}).get('faturarPeloRobo')
+            if prev_flag is not None:
+                new_gc['faturarPeloRobo'] = prev_flag
         full_data['globalConfig'] = new_gc
 
     save_data(full_data)
@@ -3886,8 +3898,10 @@ def os_gerar_pdf_anexar(os_id):
     owner, draft = _find_filial_draft(full_data, user, os_id)
     if not draft:
         return jsonify({"error": "Rascunho não encontrado"}), 404
-    if not draft.get('omieOsId'):
-        return jsonify({"error": "OS precisa estar enviada/importada do Omie."}), 400
+    # Com "faturar pelo robô" não há OS no Omie -> anexa o laudo na OPORTUNIDADE.
+    robo_sem_os = bool(draft.get('crmOpId')) and not draft.get('omieOsId')
+    if not draft.get('omieOsId') and not robo_sem_os:
+        return jsonify({"error": "OS precisa estar enviada/importada do Omie (ou a OS deve estar vinculada a uma oportunidade do CRM)."}), 400
 
     payload = request.json or {}
     # Injeta os dados da OS (serviços + peças com valores) pra gerar a página de Orçamento no PDF.
@@ -3938,26 +3952,30 @@ def os_gerar_pdf_anexar(os_id):
         b64 = base64.b64encode(zb.getvalue()).decode('utf-8')
         return b64, hashlib.md5(b64.encode('ascii')).hexdigest()
 
-    # Anexa cada documento na OS (e na oportunidade do CRM, se houver).
+    # Anexa cada documento na OS (se existir no Omie) e na oportunidade do CRM (se houver).
     for fn, by in docs:
         b64, md5h = _zip64(fn, by)
-        cod_int = ("ax" + secrets.token_hex(8))[:20]
-        try:
-            omie_call('/geral/anexo/', 'IncluirAnexo', {
-                "cCodIntAnexo": cod_int,
-                "cTabela": "ordem-servico",
-                "nId": draft['omieOsId'],
-                "cNomeArquivo": fn,
-                "cTipoArquivo": "pdf",
-                "cArquivo": b64,
-                "cMd5": md5h
-            })
-        except OmieError as e:
-            return jsonify({"error": str(e)}), e.status
+        if draft.get('omieOsId'):
+            cod_int = ("ax" + secrets.token_hex(8))[:20]
+            try:
+                omie_call('/geral/anexo/', 'IncluirAnexo', {
+                    "cCodIntAnexo": cod_int,
+                    "cTabela": "ordem-servico",
+                    "nId": draft['omieOsId'],
+                    "cNomeArquivo": fn,
+                    "cTipoArquivo": "pdf",
+                    "cArquivo": b64,
+                    "cMd5": md5h
+                })
+            except OmieError as e:
+                return jsonify({"error": str(e)}), e.status
         if draft.get('crmOpId'):
             try:
                 _incluir_anexo_omie('crm-oportunidades', draft['crmOpId'], fn, 'pdf', b64, md5h, 'op' + secrets.token_hex(2))
             except OmieError as e:
+                # Sem OS, a oportunidade é o único destino -> erro é fatal.
+                if not draft.get('omieOsId'):
+                    return jsonify({"error": f"Falha ao anexar o laudo na oportunidade: {e}"}), e.status
                 draft['crmAnexoWarning'] = f"PDF anexado na OS, mas falhou na oportunidade: {e}"
 
     draft['pdfAnexado'] = True
@@ -4156,8 +4174,11 @@ def os_crm_finalizar(os_id):
     except OmieError:
         pass
     # Anexa só as linhas ainda não presentes (idempotência).
+    # Com "faturar pelo robô", OS/PV ainda não existem (números '—') -> não registra
+    # a referência cruzada aqui (o robô gera os documentos depois).
     linhas_novas = []
-    if f"OS nº {os_num}" not in obs_atual:
+    tem_numeros = (os_num != '—') or (pv_num != '—')
+    if tem_numeros and f"OS nº {os_num}" not in obs_atual:
         linhas_novas.append(ref_linha)
     if fase_atual == CRM_FASE_PREPARACAO and draft.get('execEstado') == 'aprovado' and 'Teste do equipamento' not in obs_atual:
         linhas_novas.append(f"[Smart Report] Teste do equipamento: APROVADO em {hoje}.")
@@ -4278,6 +4299,42 @@ def _criar_ou_atualizar_pedido_venda(draft, parts_validas, nCodCC):
         draft['pedidoVendaNumero'] = result.get('numero_pedido')
 
 
+@app.route('/api/admin/api-tokens', methods=['GET', 'POST', 'DELETE'])
+def admin_api_tokens():
+    """Chaves de API permanentes (não expiram) para o robô de faturamento.
+    GET lista; POST gera nova; DELETE revoga (por token). Somente admin."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    if full_data['users'][user].get('role') != 'admin':
+        return jsonify({"error": "Apenas administradores."}), 403
+    tokens = full_data.setdefault('apiTokens', {})
+    if request.method == 'POST':
+        label = ((request.json or {}).get('label') or 'robô-faturamento').strip()[:40]
+        tok = 'sr_' + secrets.token_urlsafe(32)
+        tokens[tok] = {"username": user, "label": label,
+                       "createdAt": datetime.utcnow().isoformat() + "Z"}
+        save_data(full_data)
+        return jsonify({"token": tok, "label": label})
+    if request.method == 'DELETE':
+        tok = (request.json or {}).get('token')
+        if tok in tokens:
+            del tokens[tok]
+            save_data(full_data)
+        return jsonify({"success": True})
+    return jsonify({"tokens": [
+        {"token": k, "label": v.get('label'), "createdAt": v.get('createdAt')}
+        for k, v in tokens.items()
+    ]})
+
+
+def _faturar_pelo_robo(full_data):
+    """Flag global: quando ligada, o app NÃO cria OS/PV via API do Omie — quem
+    fatura é o robô Playwright (pela tela do Omie). Evita duplicar documentos.
+    Mantém o draft local 'sent' pra o robô ler os itens via /itens-faturamento."""
+    return bool((full_data.get('globalConfig') or {}).get('faturarPeloRobo'))
+
+
 @app.route('/api/os/<os_id>/send', methods=['POST'])
 def os_send(os_id):
     user, full_data, err = _require_user()
@@ -4302,6 +4359,21 @@ def os_send(os_id):
     for p in draft.get('parts', []):
         if not p.get('omieProductId'):
             return jsonify({"error": f"Peça '{p.get('description','')}' não está vinculada ao catálogo Omie."}), 400
+
+    # FATURAR PELO ROBÔ: não cria OS+PV via API (o robô Playwright fatura pela tela
+    # do Omie). Mantém o draft local 'sent' pra o robô ler os itens via
+    # /itens-faturamento. Só pra OS NOVA (CREATE) — OS importada do Omie segue normal.
+    if _faturar_pelo_robo(full_data) and not is_update:
+        draft['status'] = 'sent'
+        draft['faturadoPeloRobo'] = True
+        draft['omieOsId'] = None
+        draft['omieOsNumber'] = None
+        draft['sentAt'] = datetime.utcnow().isoformat() + "Z"
+        draft['sendError'] = None
+        draft['pedidoVendaError'] = None
+        save_data(full_data)
+        return jsonify({**draft, "warning": "Itens prontos. A OS e o Pedido de Venda "
+                        "NÃO foram criados via API — faça o faturamento pelo robô (Omie web)."})
 
     # Garantia APROVADA: a OS é de garantia (valor ZERO, sem cobrança) e NÃO gera Pedido de Venda.
     garantia_status = (draft.get('garantiaStatus') or 'avulsa')
@@ -4554,6 +4626,8 @@ HTML_PAGE = """
             const [headerConfig, setHeaderConfig] = useState([]);
             const [models, setModels] = useState([]);
             const [logo, setLogo] = useState(null);
+            const [faturarPeloRobo, setFaturarPeloRobo] = useState(false);
+            const [roboTokens, setRoboTokens] = useState([]);
 
             // DADOS DO USUÁRIO (Cada usuário tem o seu)
             const [headerData, setHeaderData] = useState({});
@@ -4636,6 +4710,8 @@ HTML_PAGE = """
                         const loadedModels = data.globalConfig.models || [];
                         setModels(loadedModels);
                         setLogo(data.globalConfig.logo || null);
+                        setFaturarPeloRobo(!!data.globalConfig.faturarPeloRobo);
+                        if (data.role === 'admin') fetchRoboTokens();
 
                         // Aplica Estado do Laudo (Isolado do Usuário)
                         let userHd = data.userState.headerData || {};
@@ -4685,7 +4761,7 @@ HTML_PAGE = """
 
                     // Se for admin, salva as configurações globais também
                     if (auth.role === 'admin') {
-                        payload.globalConfig = { headerConfig, models, logo };
+                        payload.globalConfig = { headerConfig, models, logo, faturarPeloRobo };
                     }
 
                     fetch('/api/data', {
@@ -4701,7 +4777,7 @@ HTML_PAGE = """
                     });
                 }, 1000);
                 return () => clearTimeout(timer);
-            }, [headerConfig, headerData, models, answers, diagramMarks, logo, reportImages, pdfMargin, cellVoltages, motorResistances, isLoaded, auth]);
+            }, [headerConfig, headerData, models, answers, diagramMarks, logo, faturarPeloRobo, reportImages, pdfMargin, cellVoltages, motorResistances, isLoaded, auth]);
 
             // Salva status temp de fotos antes da câmera abrir
             useEffect(() => {
@@ -4827,6 +4903,35 @@ HTML_PAGE = """
                 }
             }, [activeTab, auth]);
 
+            const fetchRoboTokens = () => {
+                fetch('/api/admin/api-tokens', { headers: { 'Authorization': auth.token } })
+                    .then(r => r.json()).then(d => setRoboTokens(d.tokens || [])).catch(() => {});
+            };
+            const gerarTokenRobo = async () => {
+                const label = prompt('Nome desta chave (ex.: robô-faturamento):', 'robô-faturamento');
+                if (label === null) return;
+                try {
+                    const r = await fetch('/api/admin/api-tokens', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                        body: JSON.stringify({ label })
+                    });
+                    const d = await r.json();
+                    if (d.token) {
+                        prompt('Chave gerada! Copie e use no robô (SR_TOKEN). NÃO expira:', d.token);
+                        fetchRoboTokens();
+                    } else { alert(d.error || 'Erro ao gerar chave'); }
+                } catch (e) { alert('Erro: ' + (e.message || e)); }
+            };
+            const revogarTokenRobo = async (token) => {
+                if (!confirm('Revogar esta chave? O robô que a usa vai parar de funcionar.')) return;
+                await fetch('/api/admin/api-tokens', {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                    body: JSON.stringify({ token })
+                });
+                fetchRoboTokens();
+            };
             const fetchArquivados = () => {
                 const qs = new URLSearchParams();
                 if (arqCli) qs.set('cliente', arqCli);
@@ -5041,9 +5146,14 @@ HTML_PAGE = """
                         if (data.id && data.status === 'sent') {
                             setCurrentOs(data);
                             fetchOsDrafts();
-                            let msg = `OS atualizada no Omie! Número: ${data.omieOsNumber || data.omieOsId}`;
-                            if (data.pedidoVendaNumero) msg += `\nPedido de Venda das peças: nº ${data.pedidoVendaNumero}`;
-                            if (data.warning) msg += `\n\n⚠️ ${data.warning}`;
+                            let msg;
+                            if (data.faturadoPeloRobo) {
+                                msg = data.warning || 'Itens salvos. Faça o faturamento pelo robô (Omie web).';
+                            } else {
+                                msg = `OS atualizada no Omie! Número: ${data.omieOsNumber || data.omieOsId}`;
+                                if (data.pedidoVendaNumero) msg += `\nPedido de Venda das peças: nº ${data.pedidoVendaNumero}`;
+                                if (data.warning) msg += `\n\n⚠️ ${data.warning}`;
+                            }
                             alert(msg);
                             maybeOfferClearAfterOmie(data);
                         } else {
@@ -5555,7 +5665,8 @@ HTML_PAGE = """
                         headers: { 'Content-Type': 'application/json', 'Authorization': auth.token }
                     });
                     const d1 = await r1.json();
-                    if (d1.omieOsId || d1.omieOsNumber) {
+                    // faturadoPeloRobo: sucesso SEM criar OS/PV (o robô fatura na tela do Omie).
+                    if (d1.omieOsId || d1.omieOsNumber || d1.faturadoPeloRobo) {
                         osAtual = { ...osAtual, ...d1 };
                         setCurrentOs(osAtual);
                         // O Pedido de Venda das peças pode falhar sem derrubar a OS — captura o aviso.
@@ -6787,6 +6898,36 @@ HTML_PAGE = """
                                     <i className="ph-bold ph-upload"></i> Importar Backup
                                     <input type="file" accept=".json,application/json" onChange=${e => { const f = e.target.files[0]; if (f) importConfig(f); e.target.value=''; }} className="hidden" />
                                 </label>
+                            </div>
+                        </div>
+
+                        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                            <h2 className="text-xl font-semibold mb-1 text-slate-800 flex items-center gap-2"><i className="ph-fill ph-robot text-amber-600 text-2xl"></i> Faturamento</h2>
+                            <label className="flex items-start gap-3 mt-3 cursor-pointer">
+                                <input type="checkbox" checked=${faturarPeloRobo} onChange=${e => setFaturarPeloRobo(e.target.checked)} className="mt-1 h-5 w-5 accent-amber-600" />
+                                <div>
+                                    <div className="font-medium text-slate-800">Faturar pelo robô (não criar OS/PV via API)</div>
+                                    <p className="text-sm text-slate-500">Quando LIGADO, ao enviar uma OS o app <b>não cria</b> a Ordem de Serviço nem o Pedido de Venda no Omie — apenas registra os itens e anexa o laudo na oportunidade. O faturamento (PV + OS) é feito pelo <b>robô</b> na tela do Omie. Evita documentos duplicados. Desligue para voltar ao envio automático via API.</p>
+                                    <p className=${`text-xs mt-1 font-medium ${faturarPeloRobo ? 'text-amber-700' : 'text-slate-400'}`}>${faturarPeloRobo ? '● Robô ativo — o app não cria OS/PV.' : '○ Desligado — o app cria OS/PV via API normalmente.'}</p>
+                                </div>
+                            </label>
+                            <div className="mt-5 pt-4 border-t border-slate-100">
+                                <div className="flex items-center justify-between gap-2 mb-2">
+                                    <div className="font-medium text-slate-800 flex items-center gap-2"><i className="ph-bold ph-key"></i> Chaves de acesso do robô</div>
+                                    <button onClick=${gerarTokenRobo} className="bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-1"><i className="ph-bold ph-plus"></i> Gerar chave</button>
+                                </div>
+                                <p className="text-xs text-slate-500 mb-2">Chave permanente (não expira) que o robô usa no <code>SR_TOKEN</code>. A chave só aparece por inteiro no momento da geração — guarde-a.</p>
+                                ${roboTokens.length === 0 ? html`<div className="text-sm text-slate-400">Nenhuma chave gerada.</div>` : html`
+                                    <div className="space-y-1">
+                                        ${roboTokens.map((t, i) => html`<div key=${i} className="flex items-center justify-between gap-2 text-sm bg-slate-50 rounded px-3 py-1.5">
+                                            <div className="min-w-0">
+                                                <span className="font-medium text-slate-700">${t.label || 'chave'}</span>
+                                                <span className="text-xs text-slate-400 ml-2 font-mono">${(t.token || '').slice(0, 8)}…</span>
+                                                <span className="text-xs text-slate-400 ml-2">${(t.createdAt || '').slice(0, 10)}</span>
+                                            </div>
+                                            <button onClick=${() => revogarTokenRobo(t.token)} className="text-red-600 hover:text-red-800 text-xs font-medium whitespace-nowrap"><i className="ph-bold ph-trash"></i> Revogar</button>
+                                        </div>`)}
+                                    </div>`}
                             </div>
                         </div>
 
