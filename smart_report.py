@@ -4599,6 +4599,8 @@ HTML_PAGE = """
     <script src="https://unpkg.com/@phosphor-icons/web"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <!-- Converte fotos HEIC/HEIF do iPhone (que o navegador nao renderiza) p/ JPEG -->
+    <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
 
     <style>
         @media print {
@@ -5861,9 +5863,43 @@ HTML_PAGE = """
             };
 
             // ---- Compressão de imagens (max 1200px, JPEG 75%) ----
+            // Detecta HEIC/HEIF (foto de iPhone) por mime OU pela assinatura "ftyp....heic/heif/mif1"
+            const ehHeic = (file) => {
+                if (!file) return false;
+                const t = (file.type || '').toLowerCase();
+                const n = (file.name || '').toLowerCase();
+                return t === 'image/heic' || t === 'image/heif' || n.endsWith('.heic') || n.endsWith('.heif');
+            };
+            const dataUrlEhHeic = (dataUrl) => {
+                // a partir do base64: bytes 4-11 = "ftyp" + marca (heic/heix/mif1/hevc/heif)
+                try {
+                    if (!/^data:/.test(dataUrl) || dataUrl.indexOf('base64,') === -1) return false;
+                    const b = atob(dataUrl.split('base64,')[1].slice(0, 24));
+                    if (b.slice(4, 8) !== 'ftyp') return false;
+                    const marca = b.slice(8, 12).toLowerCase();
+                    return ['heic','heix','hevc','heif','mif1','msf1'].includes(marca);
+                } catch (e) { return false; }
+            };
+            // Converte um Blob/dataUrl HEIC -> dataUrl JPEG (usa heic2any). Retorna null se nao der.
+            const heicParaJpegDataUrl = async (blobOuDataUrl) => {
+                if (typeof heic2any === 'undefined') return null;
+                try {
+                    const blob = (typeof blobOuDataUrl === 'string')
+                        ? await (await fetch(blobOuDataUrl)).blob()
+                        : blobOuDataUrl;
+                    const out = await heic2any({ blob, toType: 'image/jpeg', quality: 0.85 });
+                    const jpg = Array.isArray(out) ? out[0] : out;
+                    return await new Promise(res => {
+                        const fr = new FileReader();
+                        fr.onloadend = () => res(fr.result);
+                        fr.onerror = () => res(null);
+                        fr.readAsDataURL(jpg);
+                    });
+                } catch (e) { return null; }
+            };
+
             const compressImage = (dataUrl, maxW = 1200) => new Promise(resolve => {
-                const img = new Image();
-                img.onload = () => {
+                const desenhar = (img) => {
                     const scale = img.width > maxW ? maxW / img.width : 1;
                     const canvas = document.createElement('canvas');
                     canvas.width = Math.round(img.width * scale);
@@ -5871,7 +5907,18 @@ HTML_PAGE = """
                     canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
                     resolve(canvas.toDataURL('image/jpeg', 0.75));
                 };
-                img.onerror = () => resolve(dataUrl);
+                const img = new Image();
+                img.onload = () => desenhar(img);
+                img.onerror = async () => {
+                    // Rede de seguranca: o navegador nao decodificou (provavel HEIC do iPhone).
+                    // Converte p/ JPEG e recomprime; cura tambem fotos HEIC ja salvas no laudo.
+                    const jpg = await heicParaJpegDataUrl(dataUrl);
+                    if (!jpg) return resolve(dataUrl);
+                    const im2 = new Image();
+                    im2.onload = () => desenhar(im2);
+                    im2.onerror = () => resolve(jpg);
+                    im2.src = jpg;
+                };
                 img.src = dataUrl;
             });
 
@@ -6173,22 +6220,36 @@ HTML_PAGE = """
 
                 setSourceModalOpen(false);
 
-                const promises = files.map(file => {
-                    return new Promise((resolve) => {
-                        const reader = new FileReader();
-                        reader.onloadend = () => {
-                            resolve({
-                                id: 'img_' + Date.now() + Math.random().toString(36).substr(2, 9),
-                                src: reader.result,
-                                caption: ''
-                            });
-                        };
-                        reader.readAsDataURL(file);
-                    });
+                const lerComoDataUrl = (blob) => new Promise((resolve) => {
+                    const reader = new FileReader();
+                    reader.onloadend = () => resolve(reader.result);
+                    reader.onerror = () => resolve(null);
+                    reader.readAsDataURL(blob);
+                });
+
+                const promises = files.map(async (file) => {
+                    let src;
+                    if (ehHeic(file)) {
+                        // iPhone manda HEIC, que o navegador nao mostra -> converte p/ JPEG ja na entrada
+                        src = await heicParaJpegDataUrl(file);
+                        if (!src) src = await lerComoDataUrl(file); // ultimo recurso
+                    } else {
+                        src = await lerComoDataUrl(file);
+                        // alguns iPhones mandam HEIC com mime/extensao errados -> detecta pela assinatura
+                        if (src && dataUrlEhHeic(src)) {
+                            const conv = await heicParaJpegDataUrl(src);
+                            if (conv) src = conv;
+                        }
+                    }
+                    return {
+                        id: 'img_' + Date.now() + Math.random().toString(36).substr(2, 9),
+                        src,
+                        caption: ''
+                    };
                 });
 
                 Promise.all(promises).then(results => {
-                    setPendingImages(results);
+                    setPendingImages(results.filter(r => r && r.src));
                 });
 
                 e.target.value = null;
