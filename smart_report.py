@@ -4577,7 +4577,7 @@ HTML_PAGE = """
 
     <!-- PWA (app instalável) -->
     <link rel="manifest" href="/manifest.webmanifest">
-    <meta name="theme-color" content="#1e40af">
+    <meta name="theme-color" content="#0a0f1a">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -4602,6 +4602,11 @@ HTML_PAGE = """
     <!-- Converte fotos HEIC/HEIF do iPhone (que o navegador nao renderiza) p/ JPEG -->
     <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
 
+    <!-- Fonte Inter (tema escuro) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
     <style>
         @media print {
             @page { margin: 0; }
@@ -4623,6 +4628,86 @@ HTML_PAGE = """
         }
         .diagram-interactive { cursor: crosshair; }
         html, body { overscroll-behavior: none; }
+
+        /* ===================== TEMA ESCURO (somente tela; impressao/PDF ficam claros) ===================== */
+        @media screen {
+            :root {
+                --bg:#0a0f1a; --bg2:#0e1626; --card:#141d30; --card2:#1b2740;
+                --bd:#26324c; --bd2:#33415f; --tx:#e8edf6; --tx2:#9aa7bd;
+                --acc:#34d399; --acc2:#10b981;
+            }
+            body {
+                background: radial-gradient(1100px 560px at 50% -8%, #17223d 0%, #0a0f1a 60%) fixed !important;
+                color: var(--tx) !important;
+                font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif !important;
+            }
+            /* cards brancos -> escuro */
+            .bg-white { background-color: var(--card) !important; color: var(--tx) !important; border-color: var(--bd) !important; }
+            .shadow, .shadow-sm, .shadow-md, .shadow-lg { box-shadow: 0 10px 30px -15px rgba(0,0,0,.7), inset 0 1px 0 0 rgba(255,255,255,.02) !important; }
+            /* cinzas claros -> escuros */
+            .bg-slate-50, .bg-gray-50, .bg-slate-100, .bg-gray-100 { background-color: var(--bg2) !important; }
+            /* barra de abas */
+            .bg-slate-200 { background-color: var(--bg2) !important; border: 1px solid var(--bd) !important; }
+            .bg-slate-200 > .bg-white { background: linear-gradient(180deg, var(--card2), var(--card)) !important; color: var(--acc) !important; box-shadow: 0 0 0 1px var(--bd2), 0 10px 22px -10px rgba(16,185,129,.45) !important; }
+            /* textos neutros */
+            .text-slate-900, .text-slate-800, .text-gray-900, .text-gray-800, .text-slate-700, .text-gray-700 { color: var(--tx) !important; }
+            .text-slate-600, .text-slate-500, .text-gray-600, .text-gray-500, .text-slate-400, .text-gray-400 { color: var(--tx2) !important; }
+            /* textos coloridos ESCUROS (-800/-900) -> clareados p/ legibilidade no escuro */
+            .text-blue-900, .text-blue-800 { color: #93c5fd !important; }
+            .text-indigo-900, .text-indigo-800 { color: #a5b4fc !important; }
+            .text-sky-900, .text-sky-800 { color: #7dd3fc !important; }
+            .text-green-900, .text-green-800, .text-emerald-900, .text-emerald-800 { color: #6ee7b7 !important; }
+            .text-amber-900, .text-amber-800, .text-yellow-900, .text-yellow-800 { color: #fcd34d !important; }
+            .text-orange-900, .text-orange-800 { color: #fdba74 !important; }
+            .text-red-900, .text-red-800, .text-rose-900, .text-rose-800 { color: #fca5a5 !important; }
+            .text-teal-900, .text-teal-800 { color: #5eead4 !important; }
+            .text-purple-900, .text-purple-800, .text-fuchsia-900 { color: #d8b4fe !important; }
+            /* inputs */
+            input:not([type=checkbox]):not([type=radio]), select, textarea { background-color: #0f1828 !important; color: var(--tx) !important; border-color: var(--bd) !important; }
+            input::placeholder, textarea::placeholder { color: #5b6880 !important; }
+            select option { background: #0f1828 !important; color: var(--tx) !important; }
+            /* bordas neutras */
+            .border-slate-200, .border-slate-300, .border-gray-200, .border-gray-300, .border-slate-100 { border-color: var(--bd) !important; }
+            /* header */
+            header.bg-slate-900 { background: linear-gradient(135deg, #101a30, #0b1220) !important; border: 1px solid var(--bd) !important; box-shadow: 0 24px 50px -24px rgba(0,0,0,.85) !important; }
+            /* banners coloridos -> versao escura legivel */
+            .bg-amber-50, .bg-yellow-50 { background-color: #2a230f !important; }
+            .bg-blue-50, .bg-indigo-50 { background-color: #0f1d33 !important; }
+            .bg-green-50, .bg-emerald-50 { background-color: #0e2418 !important; }
+            .bg-red-50, .bg-rose-50 { background-color: #2a1414 !important; }
+            /* selecao/ativo com fundos claros (-100) -> escurece e mantem texto legivel */
+            .bg-blue-100, .bg-indigo-100, .bg-green-100, .bg-amber-100, .bg-sky-100, .bg-slate-300 { background-color: #16223a !important; color: var(--tx) !important; }
+            /* HOVER em fundos claros -> realce translucido + texto claro (corrige texto sumindo) */
+            [class*="hover:bg-white"]:hover,
+            [class*="hover:bg-slate-50"]:hover,
+            [class*="hover:bg-slate-100"]:hover,
+            [class*="hover:bg-slate-200"]:hover,
+            [class*="hover:bg-slate-300"]:hover,
+            [class*="hover:bg-gray-50"]:hover,
+            [class*="hover:bg-gray-100"]:hover,
+            [class*="hover:bg-gray-200"]:hover,
+            [class*="hover:bg-blue-50"]:hover,
+            [class*="hover:bg-blue-100"]:hover,
+            [class*="hover:bg-indigo-50"]:hover,
+            [class*="hover:bg-indigo-100"]:hover,
+            [class*="hover:bg-sky-50"]:hover,
+            [class*="hover:bg-amber-50"]:hover,
+            [class*="hover:bg-amber-100"]:hover,
+            [class*="hover:bg-green-50"]:hover,
+            [class*="hover:bg-emerald-50"]:hover {
+                background-color: rgba(125,211,252,.10) !important;
+                color: var(--tx) !important;
+            }
+            [class*="hover:bg-white"]:hover *,
+            [class*="hover:bg-slate-50"]:hover *,
+            [class*="hover:bg-slate-100"]:hover *,
+            [class*="hover:bg-gray-50"]:hover *,
+            [class*="hover:bg-gray-100"]:hover *,
+            [class*="hover:bg-blue-50"]:hover *,
+            [class*="hover:bg-indigo-50"]:hover * {
+                color: var(--tx) !important;
+            }
+        }
     </style>
 </head>
 <body class="bg-slate-100 text-slate-800 antialiased print:bg-white">
