@@ -1997,6 +1997,42 @@ def faturamento_pendentes():
     return jsonify({"pendentes": pend})
 
 
+@app.route('/api/faturamento/painel', methods=['GET'])
+def faturamento_painel():
+    """Painel do admin: a FILA do robô (pendentes) + as ÚLTIMAS faturadas por ele.
+    Desescapa o nome do cliente (&amp; -> &) só pra exibição. Só leitura."""
+    import html as _html
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    pend, recentes = [], []
+    for owner, d in _all_filial_drafts(full_data, user):
+        if not d.get('crmOpNum'):
+            continue
+        nome = _html.unescape((d.get('client') or {}).get('name') or '')
+        if (d.get('faturadoPeloRobo') and not d.get('roboFaturadoAt')
+                and (d.get('parts') or d.get('services'))):
+            pend.append({
+                "osId": d.get('id'),
+                "crmOpNum": d.get('crmOpNum'),
+                "cliente": nome,
+                "qtdProdutos": len(d.get('parts') or []),
+                "qtdServicos": len(d.get('services') or []),
+                "sentAt": d.get('sentAt'),
+            })
+        elif d.get('roboFaturadoAt'):
+            recentes.append({
+                "crmOpNum": d.get('crmOpNum'),
+                "cliente": nome,
+                "roboFaturadoAt": d.get('roboFaturadoAt'),
+                "roboPV": d.get('roboPV'),
+                "roboOS": d.get('roboOS'),
+            })
+    pend.sort(key=lambda x: x.get('sentAt') or '')
+    recentes.sort(key=lambda x: x.get('roboFaturadoAt') or '', reverse=True)
+    return jsonify({"pendentes": pend, "recentes": recentes[:15]})
+
+
 @app.route('/api/os/<os_id>/robo-faturado', methods=['POST'])
 def os_robo_faturado(os_id):
     """O robô avisa que faturou esta op (PV/OS gerados no Omie web). Marca
@@ -4764,6 +4800,7 @@ HTML_PAGE = """
             const [logo, setLogo] = useState(null);
             const [faturarPeloRobo, setFaturarPeloRobo] = useState(false);
             const [roboTokens, setRoboTokens] = useState([]);
+            const [filaRobo, setFilaRobo] = useState(null);   // {pendentes, recentes} — painel da fila do robô
 
             // DADOS DO USUÁRIO (Cada usuário tem o seu)
             const [headerData, setHeaderData] = useState({});
@@ -5039,9 +5076,32 @@ HTML_PAGE = """
                 }
             }, [activeTab, auth]);
 
+            // Painel "Fila do robô" (aba Templates, admin): busca ao entrar e atualiza a cada 20s
+            useEffect(() => {
+                if (!auth || auth.role !== 'admin' || activeTab !== 'settings') return;
+                fetchFilaRobo();
+                const id = setInterval(fetchFilaRobo, 20000);
+                return () => clearInterval(id);
+            }, [activeTab, auth]);
+
             const fetchRoboTokens = () => {
                 fetch('/api/admin/api-tokens', { headers: { 'Authorization': auth.token } })
                     .then(r => r.json()).then(d => setRoboTokens(d.tokens || [])).catch(() => {});
+            };
+            const fetchFilaRobo = () => {
+                fetch('/api/faturamento/painel', { headers: { 'Authorization': auth.token } })
+                    .then(r => r.json()).then(d => setFilaRobo(d)).catch(() => {});
+            };
+            const removerDaFila = async (osId, op) => {
+                if (!confirm('Remover a op ' + op + ' da fila do robô?\\n\\nMarca como JÁ FATURADA (use só se ela já tem PV/OS no Omie, ou se é um rascunho duplicado). O robô não vai mais tentar faturá-la.')) return;
+                try {
+                    await fetch('/api/os/' + osId + '/robo-faturado', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                        body: '{}'
+                    });
+                    fetchFilaRobo();
+                } catch (e) { alert('Erro: ' + (e.message || e)); }
             };
             const gerarTokenRobo = async () => {
                 const label = prompt('Nome desta chave (ex.: robô-faturamento):', 'robô-faturamento');
@@ -7143,6 +7203,53 @@ HTML_PAGE = """
                                             </div>
                                             <button onClick=${() => revogarTokenRobo(t.token)} className="text-red-600 hover:text-red-800 text-xs font-medium whitespace-nowrap"><i className="ph-bold ph-trash"></i> Revogar</button>
                                         </div>`)}
+                                    </div>`}
+                            </div>
+
+                            <div className="mt-5 pt-4 border-t border-slate-100">
+                                <div className="flex items-center justify-between gap-2 mb-1">
+                                    <div className="font-medium text-slate-800 flex items-center gap-2"><i className="ph-bold ph-list-checks"></i> Fila do robô</div>
+                                    <button onClick=${fetchFilaRobo} className="text-amber-600 hover:text-amber-700 text-sm font-medium flex items-center gap-1"><i className="ph-bold ph-arrows-clockwise"></i> Atualizar</button>
+                                </div>
+                                <p className="text-xs text-slate-500 mb-3">Oportunidades aguardando o robô faturar (PV/OS) no Omie. Atualiza sozinho a cada 20s.</p>
+                                ${filaRobo === null ? html`<div className="text-sm text-slate-400"><i className="ph ph-spinner animate-spin"></i> Carregando...</div>` : html`
+                                    <div>
+                                        ${(filaRobo.pendentes || []).length === 0
+                                            ? html`<div className="text-sm text-emerald-600 flex items-center gap-1"><i className="ph-fill ph-check-circle"></i> Fila vazia — nada pendente.</div>`
+                                            : html`
+                                            <div className="text-xs text-slate-500 mb-1">${filaRobo.pendentes.length} na fila</div>
+                                            <div className="overflow-x-auto rounded border border-slate-200">
+                                                <table className="min-w-full text-sm">
+                                                    <thead className="bg-slate-100 text-slate-700"><tr><th className="p-2 text-left">Nº Op</th><th className="p-2 text-left">Cliente</th><th className="p-2 text-center">Prod.</th><th className="p-2 text-center">Serv.</th><th className="p-2 text-left">Esperando desde</th><th className="p-2 text-right">Ação</th></tr></thead>
+                                                    <tbody className="divide-y divide-slate-100">
+                                                        ${filaRobo.pendentes.map((p, i) => html`<tr key=${i} className="hover:bg-slate-50">
+                                                            <td className="p-2 font-mono text-xs whitespace-nowrap">${p.crmOpNum}</td>
+                                                            <td className="p-2 text-xs">${p.cliente || '—'}</td>
+                                                            <td className="p-2 text-center text-xs">${p.qtdProdutos}</td>
+                                                            <td className="p-2 text-center text-xs">${p.qtdServicos}</td>
+                                                            <td className="p-2 text-xs whitespace-nowrap">${(p.sentAt || '').slice(0, 16).replace('T', ' ')}</td>
+                                                            <td className="p-2 text-right"><button onClick=${() => removerDaFila(p.osId, p.crmOpNum)} className="text-red-600 hover:text-red-800 text-xs font-medium whitespace-nowrap" title="Marcar como já faturada e remover da fila"><i className="ph-bold ph-x-circle"></i> Remover</button></td>
+                                                        </tr>`)}
+                                                    </tbody>
+                                                </table>
+                                            </div>`}
+                                        ${(filaRobo.recentes || []).length > 0 && html`
+                                            <div className="mt-4">
+                                                <div className="text-xs font-semibold text-slate-600 mb-1 flex items-center gap-1"><i className="ph-bold ph-check-circle"></i> Últimas faturadas pelo robô</div>
+                                                <div className="space-y-1">
+                                                    ${filaRobo.recentes.map((r, i) => html`<div key=${i} className="flex items-center justify-between gap-2 text-xs bg-slate-50 rounded px-3 py-1.5">
+                                                        <div className="min-w-0 truncate">
+                                                            <span className="font-mono text-slate-600">${r.crmOpNum}</span>
+                                                            <span className="text-slate-500 ml-2">${r.cliente || ''}</span>
+                                                        </div>
+                                                        <div className="text-slate-400 whitespace-nowrap flex items-center gap-2">
+                                                            ${r.roboPV ? html`<span className="text-emerald-600">PV ${r.roboPV}</span>` : ''}
+                                                            ${r.roboOS ? html`<span className="text-emerald-600">OS ${r.roboOS}</span>` : ''}
+                                                            <span>${(r.roboFaturadoAt || '').slice(0, 10)}</span>
+                                                        </div>
+                                                    </div>`)}
+                                                </div>
+                                            </div>`}
                                     </div>`}
                             </div>
                         </div>
