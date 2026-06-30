@@ -4801,6 +4801,8 @@ HTML_PAGE = """
             const [faturarPeloRobo, setFaturarPeloRobo] = useState(false);
             const [roboTokens, setRoboTokens] = useState([]);
             const [filaRobo, setFilaRobo] = useState(null);   // {pendentes, recentes} — painel da fila do robô
+            const [filaRoboTs, setFilaRoboTs] = useState(null);      // horário da última atualização (feedback)
+            const [filaRoboLoading, setFilaRoboLoading] = useState(false);
 
             // DADOS DO USUÁRIO (Cada usuário tem o seu)
             const [headerData, setHeaderData] = useState({});
@@ -5089,8 +5091,12 @@ HTML_PAGE = """
                     .then(r => r.json()).then(d => setRoboTokens(d.tokens || [])).catch(() => {});
             };
             const fetchFilaRobo = () => {
+                setFilaRoboLoading(true);
                 fetch('/api/faturamento/painel', { headers: { 'Authorization': auth.token } })
-                    .then(r => r.json()).then(d => setFilaRobo(d)).catch(() => {});
+                    .then(r => r.json())
+                    .then(d => { setFilaRobo(d); setFilaRoboTs(new Date().toLocaleTimeString('pt-BR')); })
+                    .catch(() => {})
+                    .finally(() => setFilaRoboLoading(false));
             };
             const removerDaFila = async (osId, op) => {
                 if (!confirm('Remover a op ' + op + ' da fila do robô?\\n\\nMarca como JÁ FATURADA (use só se ela já tem PV/OS no Omie, ou se é um rascunho duplicado). O robô não vai mais tentar faturá-la.')) return;
@@ -7209,7 +7215,12 @@ HTML_PAGE = """
                             <div className="mt-5 pt-4 border-t border-slate-100">
                                 <div className="flex items-center justify-between gap-2 mb-1">
                                     <div className="font-medium text-slate-800 flex items-center gap-2"><i className="ph-bold ph-list-checks"></i> Fila do robô</div>
-                                    <button onClick=${fetchFilaRobo} className="text-amber-600 hover:text-amber-700 text-sm font-medium flex items-center gap-1"><i className="ph-bold ph-arrows-clockwise"></i> Atualizar</button>
+                                    <div className="flex items-center gap-3">
+                                        ${filaRoboTs && html`<span className="text-xs text-slate-400 whitespace-nowrap">atualizado ${filaRoboTs}</span>`}
+                                        <button onClick=${fetchFilaRobo} disabled=${filaRoboLoading} className="text-amber-600 hover:text-amber-700 text-sm font-medium flex items-center gap-1 disabled:opacity-50">
+                                            <i className=${'ph-bold ph-arrows-clockwise' + (filaRoboLoading ? ' animate-spin' : '')}></i> ${filaRoboLoading ? 'Atualizando…' : 'Atualizar'}
+                                        </button>
+                                    </div>
                                 </div>
                                 <p className="text-xs text-slate-500 mb-3">Oportunidades aguardando o robô faturar (PV/OS) no Omie. Atualiza sozinho a cada 20s.</p>
                                 ${filaRobo === null ? html`<div className="text-sm text-slate-400"><i className="ph ph-spinner animate-spin"></i> Carregando...</div>` : html`
