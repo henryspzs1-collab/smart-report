@@ -1742,10 +1742,17 @@ def crm_listar_oportunidades():
             fs = op.get('fasesStatus', {}) or {}
             tk = op.get('ticket', {}) or {}
             outras = op.get('outrasInf', {}) or {}
+            c_des = ident.get('cDesOp') or ''
+            c_obs = (op.get('observacoes') or {}).get('cObs') or ''
+            # extrai o Nº de Série (e equipamento) da descrição/observações pra busca —
+            # o serial às vezes só está no cObs estruturado, não na descrição visível.
+            serial, equipamento, _def = _crm_parse_equipamento(c_des, c_obs)
             items.append({
                 "nCodOp": ident.get('nCodOp'),
                 "cNumOp": ident.get('cNumOp') or '',
-                "descricao": ident.get('cDesOp') or '',
+                "descricao": c_des,
+                "serial": serial,
+                "equipamento": equipamento,
                 "nCodConta": ident.get('nCodConta'),
                 "faseCodigo": fs.get('nCodFase'),
                 "faseNome": CRM_FASES.get(fs.get('nCodFase'), '—'),
@@ -7742,6 +7749,10 @@ HTML_PAGE = """
             };
 
             const renderCRM = () => {
+                // Mapeia oportunidades que já viraram OS no sistema (pelo crmOpId no rascunho) —
+                // usado pra badge de OS E pra buscar pelo nome do cliente do laudo/OS.
+                const draftPorOp = {};
+                (osDrafts || []).forEach(d => { if (d.crmOpId) draftPorOp[String(d.crmOpId)] = d; });
                 const termoBusca = crmBusca.trim().toLowerCase();
                 const opsFiltradas = crmOps.filter(o => {
                     const faseOk = crmFiltro === 'analise' ? o.faseCodigo === 10843780550
@@ -7750,8 +7761,14 @@ HTML_PAGE = """
                         : true;
                     if (!faseOk) return false;
                     if (!termoBusca) return true;
-                    // busca por número, cliente e equipamento/defeito (tudo mora no cNumOp + descrição)
-                    return ((o.cNumOp || '') + ' ' + (o.descricao || '')).toLowerCase().includes(termoBusca);
+                    // Busca por Nº da op, nome do cliente, equipamento e Nº de série. Nome/serial vêm
+                    // da descrição+observações (backend parseia serial); e o nome exato do cliente vem
+                    // do laudo/OS quando a op já virou OS (draftPorOp).
+                    const dOp = draftPorOp[String(o.nCodOp)];
+                    const nomeDraft = dOp ? (((dOp.client || {}).name) || ((dOp.fromLaudo || {}).client) || '') : '';
+                    const alvo = [o.cNumOp, o.descricao, o.serial, o.equipamento, nomeDraft]
+                        .filter(Boolean).join(' ').toLowerCase();
+                    return alvo.includes(termoBusca);
                 });
                 const fmt = (v) => 'R$ ' + parseFloat(v || 0).toFixed(2);
                 const FASES_CRM = [
@@ -7759,9 +7776,6 @@ HTML_PAGE = """
                     [10843780552, '03 Em Preparação'], [10843780553, '04 Finalizadas'],
                     [10843780554, '05 Pagos para envio'], [10843780555, '06 Enviadas']
                 ];
-                // Mapeia oportunidades que já viraram OS no sistema (pelo crmOpId no rascunho)
-                const draftPorOp = {};
-                (osDrafts || []).forEach(d => { if (d.crmOpId) draftPorOp[String(d.crmOpId)] = d; });
                 return html`
                     <div className="space-y-4 animate-in fade-in duration-300">
                         <div className="bg-white p-4 rounded-xl border border-slate-200 flex flex-col md:flex-row md:items-center gap-3 justify-between">
@@ -7783,7 +7797,7 @@ HTML_PAGE = """
                         <div className="flex items-center gap-2">
                             <div className="relative flex-1">
                                 <i className="ph-bold ph-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"></i>
-                                <input type="text" value=${crmBusca} onChange=${e => setCrmBusca(e.target.value)} placeholder="Buscar por número, cliente ou equipamento…" className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-sm" />
+                                <input type="text" value=${crmBusca} onChange=${e => setCrmBusca(e.target.value)} placeholder="Buscar por nº da op, cliente ou nº de série…" className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-sm" />
                             </div>
                             ${crmBusca && html`<button onClick=${() => setCrmBusca('')} className="text-slate-500 hover:text-slate-700 text-sm font-medium whitespace-nowrap flex items-center gap-1"><i className="ph-bold ph-x"></i> limpar</button>`}
                             <span className="text-xs text-slate-400 whitespace-nowrap">${opsFiltradas.length} de ${crmOps.length}</span>
