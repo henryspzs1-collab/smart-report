@@ -4774,6 +4774,7 @@ HTML_PAGE = """
             const [crmOps, setCrmOps] = useState([]);
             const [loadingCrm, setLoadingCrm] = useState(false);
             const [crmFiltro, setCrmFiltro] = useState('todas'); // todas | analise | preparacao
+            const [crmBusca, setCrmBusca] = useState('');        // busca por nº / cliente / equipamento
             const [puxandoCrm, setPuxandoCrm] = useState(null); // nCodOp sendo puxado
             const [serialBusca, setSerialBusca] = useState('');
             const [serialResultados, setSerialResultados] = useState(null); // null = não buscou ainda
@@ -7741,11 +7742,16 @@ HTML_PAGE = """
             };
 
             const renderCRM = () => {
+                const termoBusca = crmBusca.trim().toLowerCase();
                 const opsFiltradas = crmOps.filter(o => {
-                    if (crmFiltro === 'analise') return o.faseCodigo === 10843780550;
-                    if (crmFiltro === 'aprovacao') return o.faseCodigo === 10843780551;
-                    if (crmFiltro === 'preparacao') return o.faseCodigo === 10843780552;
-                    return true;
+                    const faseOk = crmFiltro === 'analise' ? o.faseCodigo === 10843780550
+                        : crmFiltro === 'aprovacao' ? o.faseCodigo === 10843780551
+                        : crmFiltro === 'preparacao' ? o.faseCodigo === 10843780552
+                        : true;
+                    if (!faseOk) return false;
+                    if (!termoBusca) return true;
+                    // busca por número, cliente e equipamento/defeito (tudo mora no cNumOp + descrição)
+                    return ((o.cNumOp || '') + ' ' + (o.descricao || '')).toLowerCase().includes(termoBusca);
                 });
                 const fmt = (v) => 'R$ ' + parseFloat(v || 0).toFixed(2);
                 const FASES_CRM = [
@@ -7774,8 +7780,17 @@ HTML_PAGE = """
                             `)}
                         </div>
 
+                        <div className="flex items-center gap-2">
+                            <div className="relative flex-1">
+                                <i className="ph-bold ph-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"></i>
+                                <input type="text" value=${crmBusca} onChange=${e => setCrmBusca(e.target.value)} placeholder="Buscar por número, cliente ou equipamento…" className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-sm" />
+                            </div>
+                            ${crmBusca && html`<button onClick=${() => setCrmBusca('')} className="text-slate-500 hover:text-slate-700 text-sm font-medium whitespace-nowrap flex items-center gap-1"><i className="ph-bold ph-x"></i> limpar</button>`}
+                            <span className="text-xs text-slate-400 whitespace-nowrap">${opsFiltradas.length} de ${crmOps.length}</span>
+                        </div>
+
                         ${opsFiltradas.length === 0 && !loadingCrm ? html`
-                            <div className="text-center py-10 text-sm text-slate-400 bg-white rounded-xl border border-slate-200">Nenhuma oportunidade nessa fase.</div>
+                            <div className="text-center py-10 text-sm text-slate-400 bg-white rounded-xl border border-slate-200">${termoBusca ? `Nenhuma oportunidade encontrada para "${crmBusca}".` : 'Nenhuma oportunidade nessa fase.'}</div>
                         ` : html`
                             <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
                                 <table className="min-w-full text-sm">
