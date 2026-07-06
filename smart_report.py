@@ -5925,24 +5925,31 @@ HTML_PAGE = """
                 let osAtual = currentOs;
 
                 // Etapa 1: salvar + enviar/atualizar OS no Omie
-                try {
-                    const savedOs = await saveCurrentOs(true);
-                    const osId = (savedOs && savedOs.id) || osAtual.id;
-                    const r1 = await fetch(`/api/os/${osId}/send`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'Authorization': auth.token }
-                    });
-                    const d1 = await r1.json();
-                    // faturadoPeloRobo: sucesso SEM criar OS/PV (o robô fatura na tela do Omie).
-                    if (d1.omieOsId || d1.omieOsNumber || d1.faturadoPeloRobo) {
-                        osAtual = { ...osAtual, ...d1 };
-                        setCurrentOs(osAtual);
-                        // O Pedido de Venda das peças pode falhar sem derrubar a OS — captura o aviso.
-                        if (d1.warning) avisos.push(d1.warning);
-                    } else {
-                        erros.push('Omie: ' + (d1.error || 'erro ao enviar OS'));
-                    }
-                } catch (e) { erros.push('Omie: ' + (e.message || e)); }
+                if (osAtual.status === 'sent') {
+                    // OS JÁ enviada (ex.: faturada pelo robô). NÃO reenvia — o backend recusaria
+                    // com "OS já foi enviada anteriormente". Segue direto pras etapas de anexo/CRM
+                    // (permite re-anexar PDF/fotos atualizados e finalizar a fase da oportunidade).
+                    avisos.push('OS já estava enviada — pulei o reenvio e segui com PDF/fotos/CRM.');
+                } else {
+                    try {
+                        const savedOs = await saveCurrentOs(true);
+                        const osId = (savedOs && savedOs.id) || osAtual.id;
+                        const r1 = await fetch(`/api/os/${osId}/send`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'Authorization': auth.token }
+                        });
+                        const d1 = await r1.json();
+                        // faturadoPeloRobo: sucesso SEM criar OS/PV (o robô fatura na tela do Omie).
+                        if (d1.omieOsId || d1.omieOsNumber || d1.faturadoPeloRobo) {
+                            osAtual = { ...osAtual, ...d1 };
+                            setCurrentOs(osAtual);
+                            // O Pedido de Venda das peças pode falhar sem derrubar a OS — captura o aviso.
+                            if (d1.warning) avisos.push(d1.warning);
+                        } else {
+                            erros.push('Omie: ' + (d1.error || 'erro ao enviar OS'));
+                        }
+                    } catch (e) { erros.push('Omie: ' + (e.message || e)); }
+                }
 
                 // Etapa 2: gerar PDF e anexar
                 if (!erros.length || osAtual.omieOsId) {
