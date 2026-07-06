@@ -1978,6 +1978,9 @@ def crm_itens_faturamento(crm_op):
         "qtdServicos": len(servicos),
         "totalProdutos": round(sum(p['quantidade'] * p['valorUnitario'] for p in produtos), 2),
         "totalServicos": round(sum(s['quantidade'] * s['valorUnitario'] for s in servicos), 2),
+        # quando True, a OS foi CORRIGIDA -> o robô deve EXCLUIR os PV/OS antigos (abertos)
+        # e REGERAR com estes itens, em vez de pular por já existirem.
+        "refaturar": bool(draft.get('refaturar')),
     })
 
 
@@ -2052,6 +2055,7 @@ def os_robo_faturado(os_id):
         return jsonify({"error": "Rascunho não encontrado"}), 404
     body = request.json or {}
     draft['roboFaturadoAt'] = datetime.utcnow().isoformat() + "Z"
+    draft.pop('refaturar', None)   # correção concluída: limpa o flag de refaturar
     if body.get('pv'):
         draft['roboPV'] = str(body['pv'])
     if body.get('os'):
@@ -2845,6 +2849,37 @@ def os_registrar_pecas(os_id):
     draft['updatedAt'] = datetime.utcnow().isoformat() + "Z"
     save_data(full_data)
     return jsonify({"success": True})
+
+
+@app.route('/api/os/<os_id>/corrigir', methods=['POST'])
+def os_corrigir(os_id):
+    """Corrige uma OS JÁ ENVIADA (peças/serviços/valores/observações) e a RECOLOCA na
+    fila do robô pra REFATURAR. Como os PV/OS no Omie ainda estão ABERTOS (sem NF-e),
+    o robô vai EXCLUIR os documentos antigos e REGERAR os corrigidos (marca 'refaturar').
+    Endpoint dedicado porque o os_update bloqueia OS com status='sent'."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    owner, draft = _find_filial_draft(full_data, user, os_id)
+    if not draft:
+        return jsonify({"error": "OS não encontrada"}), 404
+    if not draft.get('crmOpNum'):
+        return jsonify({"error": "OS sem oportunidade vinculada — o robô não consegue refaturar."}), 400
+    body = request.json or {}
+    for k in ('client', 'services', 'parts', 'observations'):
+        if k in body:
+            draft[k] = body[k]
+    # Marca pra refaturar e devolve pra fila do robô (limpa o carimbo de faturado).
+    # Garante faturadoPeloRobo pra reentrar na fila de /faturamento/pendentes.
+    draft['faturadoPeloRobo'] = True
+    draft['refaturar'] = True
+    draft.pop('roboFaturadoAt', None)
+    draft.pop('roboPV', None)
+    draft.pop('roboOS', None)
+    draft['corrigidoEm'] = datetime.utcnow().isoformat() + "Z"
+    draft['updatedAt'] = draft['corrigidoEm']
+    save_data(full_data)
+    return jsonify(draft)
 
 
 # Estados válidos do fluxo de execução/teste (fase "03 Em Preparação").
@@ -4847,6 +4882,8 @@ HTML_PAGE = """
             // Estados de Ordens de Serviço (Omie)
             const [osDrafts, setOsDrafts] = useState([]);
             const [currentOs, setCurrentOs] = useState(null);
+            const [corrigindo, setCorrigindo] = useState(false);   // modo "Corrigir OS" (destrava OS enviada p/ refaturar)
+            const [salvandoCorrecao, setSalvandoCorrecao] = useState(false);
             const [osFilter, setOsFilter] = useState('todas'); // todas | pendentes | enviadas
             const [omieStatus, setOmieStatus] = useState({ checked: false, ok: false, configured: false, message: '' });
             const [omieAbertas, setOmieAbertas] = useState([]);
@@ -7920,7 +7957,30 @@ HTML_PAGE = """
                     const removeService = (i) => updateOs({ services: currentOs.services.filter((_, idx) => idx !== i) });
                     const addPart = () => updateOs({ parts: [...(currentOs.parts || []), { omieProductId: null, code: '', description: '', quantity: 1, unitPrice: 0 }] });
                     const removePart = (i) => updateOs({ parts: currentOs.parts.filter((_, idx) => idx !== i) });
-                    const isLocked = currentOs.status === 'sent';
+                    const isLocked = currentOs.status === 'sent' && !corrigindo;
+                    // Só faz sentido "Corrigir" (refaturar pelo robô) uma OS enviada, vinculada a
+                    // uma oportunidade, e faturada pelo robô (sem NF-e emitida, docs abertos no Omie).
+                    const podeCorrigir = currentOs.status === 'sent' && currentOs.crmOpNum;
+                    const salvarCorrecao = async () => {
+                        if (!confirm('Salvar a correção?\\n\\nIMPORTANTE: exclua o PV/OS ANTIGO no Omie ANTES de salvar (é documento aberto, sem NF-e). Ao salvar, a OS volta para a fila e o robô GERA os documentos corrigidos.\\n\\nSe o doc antigo ainda existir, o robô espera e NÃO duplica.\\n\\nJá pode salvar?')) return;
+                        setSalvandoCorrecao(true);
+                        try {
+                            const r = await fetch(`/api/os/${currentOs.id}/corrigir`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                                body: JSON.stringify({
+                                    client: currentOs.client, services: currentOs.services,
+                                    parts: currentOs.parts, observations: currentOs.observations
+                                })
+                            });
+                            const d = await r.json();
+                            if (d && d.id) {
+                                setCurrentOs(d); setCorrigindo(false); fetchOsDrafts();
+                                alert('Correção salva! A OS voltou para a fila do robô — ele vai refaturar no Omie em instantes.');
+                            } else { alert('Erro: ' + (d.error || 'falha ao salvar correção')); }
+                        } catch (e) { alert('Erro de rede: ' + (e.message || e)); }
+                        finally { setSalvandoCorrecao(false); }
+                    };
 
                     // ---- Execução & Teste (fase "03 Em Preparação") ----
                     const emPreparacao = currentOs.crmFaseCodigo === 10843780552;
@@ -7975,11 +8035,13 @@ HTML_PAGE = """
                                     <button onClick=${() => setCurrentOs(null)} className="text-sm text-slate-500 hover:text-slate-700"><i className="ph-bold ph-arrow-left"></i> Voltar para lista</button>
                                     <h2 className="text-xl font-bold text-slate-800 mt-1 flex items-center gap-2">
                                         <i className="ph-fill ph-clipboard-text text-indigo-600 text-2xl"></i>
-                                        ${isLocked
-                                            ? `OS #${currentOs.omieOsNumber || currentOs.omieOsId} (enviada)`
-                                            : (currentOs.status === 'imported'
-                                                ? `Editando OS #${currentOs.omieOsNumber || currentOs.omieOsId} (vinda do Omie)`
-                                                : 'Editar Rascunho de OS')}
+                                        ${corrigindo
+                                            ? `Corrigindo OS ${currentOs.crmOpNum || ('#' + (currentOs.omieOsNumber || currentOs.omieOsId || ''))} — vai refaturar`
+                                            : (isLocked
+                                                ? `OS #${currentOs.omieOsNumber || currentOs.omieOsId} (enviada)`
+                                                : (currentOs.status === 'imported'
+                                                    ? `Editando OS #${currentOs.omieOsNumber || currentOs.omieOsId} (vinda do Omie)`
+                                                    : 'Editar Rascunho de OS'))}
                                     </h2>
                                 </div>
                                 <div className="flex gap-2 flex-wrap">
@@ -7992,11 +8054,21 @@ HTML_PAGE = """
                                             <i className="ph-bold ph-file-text"></i> Preencher Laudo desta OS
                                         </button>
                                     `}
-                                    ${!isLocked && html`
+                                    ${!isLocked && !corrigindo && html`
                                         <button onClick=${() => saveCurrentOs(false)} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded font-medium flex items-center gap-1"><i className="ph-bold ph-floppy-disk"></i> Salvar</button>
                                         <button onClick=${sendOsToOmie} disabled=${omieStatus.checked && !omieStatus.ok} className=${`px-4 py-2 rounded font-medium flex items-center gap-1 text-white ${(omieStatus.checked && !omieStatus.ok) ? 'bg-slate-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'}`}>
                                             <i className="ph-bold ph-paper-plane-tilt"></i> ${currentOs.status === 'imported' ? 'Atualizar OS no Omie' : 'Enviar pro Omie'}
                                         </button>
+                                    `}
+
+                                    ${podeCorrigir && !corrigindo && html`
+                                        <button onClick=${() => setCorrigindo(true)} title="Editar peças/serviços/valores e refaturar no Omie" className="bg-amber-500 hover:bg-amber-600 text-white px-4 py-2 rounded font-medium flex items-center gap-1"><i className="ph-bold ph-pencil-simple"></i> Corrigir OS</button>
+                                    `}
+                                    ${corrigindo && html`
+                                        <button onClick=${salvarCorrecao} disabled=${salvandoCorrecao} className=${`px-4 py-2 rounded font-bold flex items-center gap-1 text-white ${salvandoCorrecao ? 'bg-slate-400 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700'}`}>
+                                            ${salvandoCorrecao ? html`<i className="ph ph-spinner animate-spin"></i> Salvando...` : html`<i className="ph-bold ph-arrows-clockwise"></i> Salvar correção`}
+                                        </button>
+                                        <button onClick=${() => { setCorrigindo(false); abrirOsCompleta(currentOs); }} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded font-medium">Cancelar</button>
                                     `}
                                     ${(isLocked || currentOs.status === 'imported') && (currentOs.omieOsId || currentOs.crmOpId) && html`
                                         <button onClick=${anexarLaudoPDF} className=${`px-4 py-2 rounded font-medium flex items-center gap-1 text-white ${currentOs.pdfAnexado ? 'bg-slate-500 hover:bg-slate-600' : 'bg-purple-600 hover:bg-purple-700'}`}>
@@ -8006,15 +8078,23 @@ HTML_PAGE = """
                                             <i className="ph-bold ph-images"></i> ${currentOs.fotosAnexadas ? `Re-anexar Fotos (${currentOs.fotosCount || 0})` : 'Anexar Fotos (ZIP)'}
                                         </button>
                                     `}
+                                    ${!corrigindo && html`
                                     <button onClick=${finalizarCompleto} disabled=${finalizando} className=${`px-4 py-2 rounded-lg font-bold flex items-center gap-2 text-white shadow-md transition ${finalizando ? 'bg-slate-400 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700'}`}>
                                         ${finalizando
                                             ? html`<i className="ph ph-spinner animate-spin"></i> Enviando...`
                                             : html`<i className="ph-bold ph-check-circle"></i> Finalizar e Enviar Tudo`}
-                                    </button>
+                                    </button>`}
                                 </div>
                             </div>
 
                             ${osSendError && html`<div className="bg-red-50 border border-red-200 text-red-700 p-3 rounded">${osSendError}</div>`}
+
+                            ${corrigindo && html`
+                                <div className="bg-amber-50 border border-amber-300 p-3 rounded-lg text-sm text-amber-800 flex items-start gap-2">
+                                    <i className="ph-fill ph-warning-circle text-lg"></i>
+                                    <span><b>Modo correção.</b> Ajuste peças, serviços e valores. <b>Passo importante:</b> exclua o <b>PV/OS antigo no Omie</b> (documento aberto, sem NF-e). Depois clique <b>"Salvar correção"</b> — a OS volta pra fila e o robô gera os documentos corrigidos. Se esquecer de excluir, o robô espera e não duplica.</span>
+                                </div>
+                            `}
 
                             ${currentOs.fromLaudo && html`
                                 <div className="bg-blue-50 border border-blue-200 p-3 rounded-lg text-sm text-blue-800 flex items-center gap-2">
