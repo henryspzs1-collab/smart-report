@@ -2839,7 +2839,7 @@ def os_registrar_pecas(os_id):
     body = request.json or {}
     novas = body.get('parts') or []
     parts = draft.get('parts') or []
-    campos = ('substituida', 'serialAntigo', 'fotoSerialAntigo', 'serialNovo', 'fotoSerialNovo')
+    campos = ('substituida', 'temSerie', 'serialAntigo', 'fotoSerialAntigo', 'serialNovo', 'fotoSerialNovo')
     for i, np in enumerate(novas):
         if i < len(parts):
             for c in campos:
@@ -2880,6 +2880,54 @@ def os_corrigir(os_id):
     draft['updatedAt'] = draft['corrigidoEm']
     save_data(full_data)
     return jsonify(draft)
+
+
+@app.route('/api/os/<os_id>/exec-checklist', methods=['POST'])
+def os_exec_checklist(os_id):
+    """Salva o checklist de execução (quais serviços já foram feitos / peças já trocadas).
+    Informativo — ajuda o técnico a acompanhar o que falta. Funciona com OS enviada."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    owner, draft = _find_filial_draft(full_data, user, os_id)
+    if not draft:
+        return jsonify({"error": "OS não encontrada"}), 404
+    body = request.json or {}
+    if isinstance(body.get('checklistServicos'), list):
+        draft['checklistServicos'] = [bool(x) for x in body['checklistServicos']]
+    if isinstance(body.get('checklistPecas'), list):
+        draft['checklistPecas'] = [bool(x) for x in body['checklistPecas']]
+    draft['updatedAt'] = datetime.utcnow().isoformat() + "Z"
+    save_data(full_data)
+    return jsonify({"success": True})
+
+
+@app.route('/api/os/<os_id>/pdf-substituicoes', methods=['POST'])
+def os_pdf_substituicoes(os_id):
+    """Gera o PDF das peças substituídas (nº série retirada/nova + fotos) da OS.
+    Usa os dados da tela (body.parts/client) se enviados, senão o draft salvo."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    owner, draft = _find_filial_draft(full_data, user, os_id)
+    if not draft:
+        return jsonify({"error": "OS não encontrada"}), 404
+    body = request.json or {}
+    dados = {
+        "client": body.get('client') or draft.get('client'),
+        "parts": body.get('parts') if isinstance(body.get('parts'), list) else draft.get('parts'),
+        "fromLaudo": draft.get('fromLaudo'),
+        "omieOsNumber": draft.get('omieOsNumber'),
+        "crmOpNum": draft.get('crmOpNum'),
+    }
+    logo = (full_data.get('globalConfig') or {}).get('logo')
+    try:
+        pdf = _gerar_pdf_substituicoes(dados, logo)
+    except Exception as e:
+        return jsonify({"error": "Falha ao gerar PDF: %s" % e}), 500
+    from flask import Response
+    return Response(pdf, mimetype='application/pdf',
+                    headers={'Content-Disposition': 'attachment; filename="pecas_substituidas.pdf"'})
 
 
 # Estados válidos do fluxo de execução/teste (fase "03 Em Preparação").
@@ -3441,6 +3489,106 @@ def _gerar_pdf_orcamento(payload):
 
     osq = payload.get('osQuote') or {}
     story += _orcamento_story(osq, page_break=False, titulo="Orçamento de Serviços e Peças")
+    doc.build(story, onFirstPage=_on_page, onLaterPages=_on_page)
+    return buf.getvalue()
+
+
+def _gerar_pdf_substituicoes(dados, logo=None):
+    """PDF com as PEÇAS SUBSTITUÍDAS (descrição + nº série retirada/nova + fotos),
+    pra rastreabilidade de garantia. `dados` = {client, parts, fromLaudo, omieOsNumber, crmOpNum}."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
+    from reportlab.lib.utils import ImageReader
+
+    import html as _html
+    def esc(x):
+        return _html.escape(str(x if x is not None else ''))
+
+    C_DARK = colors.HexColor('#1e293b'); C_MUTED = colors.HexColor('#6b7280'); C_BORDER = colors.HexColor('#d1d5db')
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=15*mm, rightMargin=15*mm, topMargin=16*mm, bottomMargin=16*mm, title="Pecas Substituidas - Biodron")
+    story = []; styles = getSampleStyleSheet()
+    body = ParagraphStyle('sub_body', parent=styles['BodyText'], fontSize=9, leading=12, textColor=C_DARK)
+    small = ParagraphStyle('sub_small', parent=body, fontSize=8, textColor=C_MUTED)
+    h1 = ParagraphStyle('sub_h1', parent=styles['Heading1'], fontSize=15, spaceAfter=2, textColor=C_DARK)
+    cell = ParagraphStyle('sub_cell', parent=body, fontSize=8.5, leading=11)
+
+    def _on_page(canvas, doc_):
+        canvas.saveState(); canvas.setStrokeColor(C_BORDER); canvas.setLineWidth(0.5)
+        canvas.line(15*mm, 12*mm, 195*mm, 12*mm)
+        canvas.setFont('Helvetica', 7); canvas.setFillColor(C_MUTED)
+        canvas.drawString(15*mm, 8*mm, "Laboratório BioDron · Soluções Tecnológicas")
+        canvas.drawRightString(195*mm, 8*mm, f"Página {doc_.page}")
+        canvas.restoreState()
+
+    logo_img = None
+    if logo:
+        try:
+            raw = logo.split(',', 1)[1] if ',' in logo else logo
+            bio = io.BytesIO(base64.b64decode(raw)); ir = ImageReader(bio); iw, ih = ir.getSize()
+            ratio = min(130.0/iw, 55.0/ih); bio.seek(0); logo_img = Image(bio, width=iw*ratio, height=ih*ratio)
+        except Exception:
+            logo_img = None
+    head_left = logo_img or Paragraph("<b>BioDron</b>", h1)
+    head_right = Paragraph("<b>PEÇAS SUBSTITUÍDAS</b>", ParagraphStyle('sub_t', parent=h1, alignment=2, fontSize=13))
+    htbl = Table([[head_left, head_right]], colWidths=[90*mm, 90*mm])
+    htbl.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'MIDDLE'), ('ALIGN', (1,0), (1,0), 'RIGHT')]))
+    story.append(htbl); story.append(Spacer(1, 6))
+
+    cliente = _html.unescape((dados.get('client') or {}).get('name') or '—')
+    os_num = dados.get('omieOsNumber') or dados.get('crmOpNum') or '—'
+    equip = (dados.get('fromLaudo') or {}).get('model') or ''
+    info = "<b>Cliente:</b> %s &nbsp;&nbsp; <b>OS/Oportunidade:</b> %s" % (esc(cliente), esc(os_num))
+    if equip:
+        info += " &nbsp;&nbsp; <b>Equipamento:</b> %s" % esc(equip)
+    story.append(Paragraph(info, small)); story.append(Spacer(1, 8))
+
+    subs = [p for p in (dados.get('parts') or []) if isinstance(p, dict) and p.get('substituida')]
+    if not subs:
+        story.append(Paragraph("Nenhuma peça substituída registrada nesta OS.", body))
+    else:
+        rows = [[Paragraph("<b>Peça</b>", cell), Paragraph("<b>Nº Série (retirada)</b>", cell), Paragraph("<b>Nº Série (nova)</b>", cell)]]
+        for p in subs:
+            nome = p.get('description') or p.get('code') or 'peça'
+            if p.get('temSerie'):
+                sa = p.get('serialAntigo') or '—'; sn = p.get('serialNovo') or '—'
+            else:
+                sa = 'sem série'; sn = 'sem série'
+            rows.append([Paragraph(esc(nome), cell), Paragraph(esc(sa), cell), Paragraph(esc(sn), cell)])
+        t = Table(rows, colWidths=[80*mm, 50*mm, 50*mm])
+        t.setStyle(TableStyle([
+            ('GRID', (0,0), (-1,-1), 0.5, C_BORDER),
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#f1f5f9')),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+            ('LEFTPADDING', (0,0), (-1,-1), 5), ('RIGHTPADDING', (0,0), (-1,-1), 5),
+            ('TOPPADDING', (0,0), (-1,-1), 4), ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+        ]))
+        story.append(t)
+        # Fotos dos números de série (quando houver)
+        for p in subs:
+            fotos = []
+            for campo, rot in (('fotoSerialAntigo', 'Série retirada'), ('fotoSerialNovo', 'Série nova')):
+                src = p.get(campo)
+                if isinstance(src, str) and src.startswith('data:') and 'base64,' in src:
+                    try:
+                        bio = io.BytesIO(base64.b64decode(src.split('base64,', 1)[1]))
+                        ir = ImageReader(bio); iw, ih = ir.getSize()
+                        ratio = min(80.0/iw, 55.0/ih); bio.seek(0)
+                        fotos.append((Image(bio, width=iw*ratio, height=ih*ratio), rot))
+                    except Exception:
+                        pass
+            if fotos:
+                story.append(Spacer(1, 8))
+                story.append(Paragraph("<b>%s</b> — fotos do nº de série:" % esc(p.get('description') or p.get('code') or 'peça'), small))
+                ft = Table([[f[0] for f in fotos], [Paragraph(f[1], small) for f in fotos]], colWidths=[85*mm] * len(fotos))
+                ft.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP'), ('ALIGN', (0,0), (-1,-1), 'CENTER')]))
+                story.append(ft)
+
+    story.append(Spacer(1, 14))
+    story.append(Paragraph("Documento gerado para rastreabilidade de garantia — registro das peças substituídas e seus números de série.", small))
     doc.build(story, onFirstPage=_on_page, onLaterPages=_on_page)
     return buf.getvalue()
 
@@ -7857,7 +8005,7 @@ HTML_PAGE = """
                                             <th className="p-3 text-left">Nº</th>
                                             <th className="p-3 text-left">Descrição (equipamento / defeito)</th>
                                             <th className="p-3 text-left">Fase</th>
-                                            <th className="p-3 text-right">Ticket</th>
+                                            ${auth.role === 'admin' && html`<th className="p-3 text-right">Ticket</th>`}
                                             <th className="p-3 text-left">OS</th>
                                             <th className="p-3 text-right">Ação</th>
                                         </tr>
@@ -7874,7 +8022,7 @@ HTML_PAGE = """
                                                         ${FASES_CRM.map(f => html`<option key=${f[0]} value=${f[0]}>${f[1]}</option>`)}
                                                     </select>
                                                 </td>
-                                                <td className="p-3 text-xs text-right whitespace-nowrap">${o.ticket.total ? fmt(o.ticket.total) : '—'}</td>
+                                                ${auth.role === 'admin' && html`<td className="p-3 text-xs text-right whitespace-nowrap">${o.ticket.total ? fmt(o.ticket.total) : '—'}</td>`}
                                                 <td className="p-3 text-xs">
                                                     ${draftDaOp ? (draftDaOp.omieOsNumber ? html`<span className="bg-green-100 text-green-700 px-2 py-0.5 rounded font-bold whitespace-nowrap"><i className="ph-fill ph-check-circle"></i> OS ${draftDaOp.omieOsNumber}</span>` : html`<span className="bg-slate-200 text-slate-600 px-2 py-0.5 rounded font-bold whitespace-nowrap">rascunho</span>`) : html`<span className="text-slate-300">—</span>`}
                                                 </td>
@@ -7937,6 +8085,24 @@ HTML_PAGE = """
                             else alert('Erro: ' + (d.error || 'falha ao salvar'));
                         } catch (e) { alert('Erro de rede: ' + (e.message || e)); }
                     };
+                    const gerarPdfSubstituicoes = async () => {
+                        try {
+                            const r = await fetch(`/api/os/${currentOs.id}/pdf-substituicoes`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                                body: JSON.stringify({ parts: currentOs.parts, client: currentOs.client })
+                            });
+                            if (!r.ok) { alert('Erro ao gerar o PDF de peças substituídas.'); return; }
+                            const blob = await r.blob();
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement('a');
+                            a.href = url;
+                            const nome = ((currentOs.client && currentOs.client.name) || 'os').replace(/[^a-zA-Z0-9_-]/g, '_');
+                            a.download = `pecas_substituidas_${nome}.pdf`;
+                            a.click();
+                            URL.revokeObjectURL(url);
+                        } catch (e) { alert('Erro: ' + (e.message || e)); }
+                    };
                     // Controles de substituição (nº de série velho/novo + foto) — reaproveitados
                     // na seção Peças E no painel de Execução & Teste (preenchidos no momento da troca).
                     const substituicaoControles = (p, i) => html`
@@ -7946,17 +8112,26 @@ HTML_PAGE = """
                                 <i className="ph-bold ph-arrows-left-right text-amber-600"></i> Peça substituída — registrar troca (nº de série)
                             </label>
                             ${p.substituida && html`
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
-                                    <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-                                        <div className="text-xs font-bold text-red-700 uppercase mb-1"><i className="ph-fill ph-wrench"></i> Peça retirada (velha)</div>
-                                        <input type="text" placeholder="Nº de série da peça velha" value=${p.serialAntigo || ''} onChange=${e => updatePart(i, { serialAntigo: e.target.value })} className="w-full p-1.5 border border-slate-300 rounded text-sm mb-2 font-mono" />
-                                        ${p.fotoSerialAntigo ? html`<div className="relative"><img src=${p.fotoSerialAntigo} className="w-full h-28 object-contain border rounded bg-white" /><button onClick=${() => updatePart(i, { fotoSerialAntigo: null })} className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-6 h-6 text-xs"><i className="ph ph-x"></i></button></div>` : html`<label className="flex items-center justify-center gap-1 text-xs bg-white border border-dashed border-red-300 rounded p-3 cursor-pointer text-red-600 hover:bg-red-50"><i className="ph-bold ph-camera"></i> Foto do nº de série<input type="file" accept="image/*" capture="environment" className="hidden" onChange=${e => setPartPhoto(i, 'fotoSerialAntigo', e.target.files[0])} /></label>`}
+                                <div className="mt-3">
+                                    <div className="flex items-center gap-4 text-sm text-slate-600 mb-2">
+                                        <span className="font-medium">Esta peça tem número de série?</span>
+                                        <label className="flex items-center gap-1 cursor-pointer"><input type="radio" checked=${p.temSerie === true} onChange=${() => updatePart(i, { temSerie: true })} className="accent-emerald-600" /> Sim</label>
+                                        <label className="flex items-center gap-1 cursor-pointer"><input type="radio" checked=${p.temSerie === false} onChange=${() => updatePart(i, { temSerie: false })} className="accent-emerald-600" /> Não</label>
                                     </div>
-                                    <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3">
-                                        <div className="text-xs font-bold text-emerald-700 uppercase mb-1"><i className="ph-fill ph-seal-check"></i> Peça nova (instalada)</div>
-                                        <input type="text" placeholder="Nº de série da peça nova" value=${p.serialNovo || ''} onChange=${e => updatePart(i, { serialNovo: e.target.value })} className="w-full p-1.5 border border-slate-300 rounded text-sm mb-2 font-mono" />
-                                        ${p.fotoSerialNovo ? html`<div className="relative"><img src=${p.fotoSerialNovo} className="w-full h-28 object-contain border rounded bg-white" /><button onClick=${() => updatePart(i, { fotoSerialNovo: null })} className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-6 h-6 text-xs"><i className="ph ph-x"></i></button></div>` : html`<label className="flex items-center justify-center gap-1 text-xs bg-white border border-dashed border-emerald-300 rounded p-3 cursor-pointer text-emerald-600 hover:bg-emerald-50"><i className="ph-bold ph-camera"></i> Foto do nº de série<input type="file" accept="image/*" capture="environment" className="hidden" onChange=${e => setPartPhoto(i, 'fotoSerialNovo', e.target.files[0])} /></label>`}
+                                    ${p.temSerie === true ? html`
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                        <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                                            <div className="text-xs font-bold text-red-700 uppercase mb-1"><i className="ph-fill ph-wrench"></i> Peça retirada (velha)</div>
+                                            <input type="text" placeholder="Nº de série da peça velha" value=${p.serialAntigo || ''} onChange=${e => updatePart(i, { serialAntigo: e.target.value })} className="w-full p-1.5 border border-slate-300 rounded text-sm mb-2 font-mono" />
+                                            ${p.fotoSerialAntigo ? html`<div className="relative"><img src=${p.fotoSerialAntigo} className="w-full h-28 object-contain border rounded bg-white" /><button onClick=${() => updatePart(i, { fotoSerialAntigo: null })} className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-6 h-6 text-xs"><i className="ph ph-x"></i></button></div>` : html`<label className="flex items-center justify-center gap-1 text-xs bg-white border border-dashed border-red-300 rounded p-3 cursor-pointer text-red-600 hover:bg-red-50"><i className="ph-bold ph-camera"></i> Foto do nº de série<input type="file" accept="image/*" capture="environment" className="hidden" onChange=${e => setPartPhoto(i, 'fotoSerialAntigo', e.target.files[0])} /></label>`}
+                                        </div>
+                                        <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3">
+                                            <div className="text-xs font-bold text-emerald-700 uppercase mb-1"><i className="ph-fill ph-seal-check"></i> Peça nova (instalada)</div>
+                                            <input type="text" placeholder="Nº de série da peça nova" value=${p.serialNovo || ''} onChange=${e => updatePart(i, { serialNovo: e.target.value })} className="w-full p-1.5 border border-slate-300 rounded text-sm mb-2 font-mono" />
+                                            ${p.fotoSerialNovo ? html`<div className="relative"><img src=${p.fotoSerialNovo} className="w-full h-28 object-contain border rounded bg-white" /><button onClick=${() => updatePart(i, { fotoSerialNovo: null })} className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-6 h-6 text-xs"><i className="ph ph-x"></i></button></div>` : html`<label className="flex items-center justify-center gap-1 text-xs bg-white border border-dashed border-emerald-300 rounded p-3 cursor-pointer text-emerald-600 hover:bg-emerald-50"><i className="ph-bold ph-camera"></i> Foto do nº de série<input type="file" accept="image/*" capture="environment" className="hidden" onChange=${e => setPartPhoto(i, 'fotoSerialNovo', e.target.files[0])} /></label>`}
+                                        </div>
                                     </div>
+                                    ` : (p.temSerie === false ? html`<div className="text-xs text-slate-500 italic bg-slate-50 border border-slate-200 rounded p-2">Peça sem número de série — troca registrada sem serial.</div>` : html`<div className="text-xs text-amber-600"><i className="ph-bold ph-arrow-up"></i> Selecione se a peça tem número de série.</div>`)}
                                 </div>
                             `}
                         </div>`;
@@ -7965,6 +8140,8 @@ HTML_PAGE = """
                     const addPart = () => updateOs({ parts: [...(currentOs.parts || []), { omieProductId: null, code: '', description: '', quantity: 1, unitPrice: 0 }] });
                     const removePart = (i) => updateOs({ parts: currentOs.parts.filter((_, idx) => idx !== i) });
                     const isLocked = currentOs.status === 'sent' && !corrigindo;
+                    // Usuário PADRÃO (não-admin) não vê valores de peças/serviços nem totais.
+                    const verValores = auth.role === 'admin';
                     // Só faz sentido "Corrigir" (refaturar pelo robô) uma OS enviada, vinculada a
                     // uma oportunidade, e faturada pelo robô (sem NF-e emitida, docs abertos no Omie).
                     const podeCorrigir = currentOs.status === 'sent' && currentOs.crmOpNum;
@@ -7992,6 +8169,22 @@ HTML_PAGE = """
                     // ---- Execução & Teste (fase "03 Em Preparação") ----
                     const emPreparacao = currentOs.crmFaseCodigo === 10843780552;
                     const execEstado = currentOs.execEstado || 'a_executar';
+                    // Checklist de execução (serviços feitos / peças trocadas) — informativo.
+                    const toggleChecklist = async (tipo, idx) => {
+                        const key = tipo === 'servico' ? 'checklistServicos' : 'checklistPecas';
+                        const base = tipo === 'servico' ? (currentOs.services || []) : (currentOs.parts || []);
+                        const arr = base.map((_, i) => !!(currentOs[key] || [])[i]);
+                        arr[idx] = !arr[idx];
+                        setCurrentOs({ ...currentOs, [key]: arr });
+                        try {
+                            await fetch(`/api/os/${currentOs.id}/exec-checklist`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                                body: JSON.stringify({ [key]: arr })
+                            });
+                        } catch (e) {}
+                    };
+                    const contaFeitos = (key, base) => (base || []).filter((_, i) => (currentOs[key] || [])[i]).length;
                     const setExecEstado = async (estado, motivo) => {
                         setExecSalvando(true);
                         try {
@@ -8135,12 +8328,30 @@ HTML_PAGE = """
                                         ` : html`
                                             <div className="grid md:grid-cols-2 gap-4 text-sm">
                                                 <div>
-                                                    <div className="font-semibold text-slate-700 mb-1"><i className="ph-bold ph-wrench"></i> Serviços a executar</div>
-                                                    ${(currentOs.services || []).length ? html`<ul className="list-disc list-inside text-slate-600 space-y-0.5">${currentOs.services.map((s, i) => html`<li key=${i}>${s.description || s.code || 'serviço'}${s.quantity > 1 ? ` (${s.quantity}x)` : ''}</li>`)}</ul>` : html`<span className="text-slate-400">—</span>`}
+                                                    <div className="font-semibold text-slate-700 mb-1 flex items-center justify-between">
+                                                        <span><i className="ph-bold ph-wrench"></i> Serviços a executar</span>
+                                                        ${(currentOs.services || []).length ? html`<span className="text-xs font-normal text-slate-400">${contaFeitos('checklistServicos', currentOs.services)}/${currentOs.services.length}</span>` : ''}
+                                                    </div>
+                                                    ${(currentOs.services || []).length ? html`<div className="space-y-1">${currentOs.services.map((s, i) => {
+                                                        const feito = !!(currentOs.checklistServicos || [])[i];
+                                                        return html`<label key=${i} className="flex items-start gap-2 cursor-pointer">
+                                                            <input type="checkbox" checked=${feito} onChange=${() => toggleChecklist('servico', i)} className="mt-0.5 h-4 w-4 accent-emerald-600 flex-shrink-0" />
+                                                            <span className=${feito ? 'line-through text-slate-400' : 'text-slate-600'}>${s.description || s.code || 'serviço'}${s.quantity > 1 ? ` (${s.quantity}x)` : ''}</span>
+                                                        </label>`;
+                                                    })}</div>` : html`<span className="text-slate-400">—</span>`}
                                                 </div>
                                                 <div>
-                                                    <div className="font-semibold text-slate-700 mb-1"><i className="ph-bold ph-package"></i> Peças a substituir</div>
-                                                    ${(currentOs.parts || []).length ? html`<ul className="list-disc list-inside text-slate-600 space-y-0.5">${currentOs.parts.map((p, i) => html`<li key=${i}>${p.description || p.code || 'peça'}${p.quantity > 1 ? ` (${p.quantity}x)` : ''}</li>`)}</ul>` : html`<span className="text-slate-400">—</span>`}
+                                                    <div className="font-semibold text-slate-700 mb-1 flex items-center justify-between">
+                                                        <span><i className="ph-bold ph-package"></i> Peças a substituir</span>
+                                                        ${(currentOs.parts || []).length ? html`<span className="text-xs font-normal text-slate-400">${contaFeitos('checklistPecas', currentOs.parts)}/${currentOs.parts.length}</span>` : ''}
+                                                    </div>
+                                                    ${(currentOs.parts || []).length ? html`<div className="space-y-1">${currentOs.parts.map((p, i) => {
+                                                        const feito = !!(currentOs.checklistPecas || [])[i];
+                                                        return html`<label key=${i} className="flex items-start gap-2 cursor-pointer">
+                                                            <input type="checkbox" checked=${feito} onChange=${() => toggleChecklist('peca', i)} className="mt-0.5 h-4 w-4 accent-emerald-600 flex-shrink-0" />
+                                                            <span className=${feito ? 'line-through text-slate-400' : 'text-slate-600'}>${p.description || p.code || 'peça'}${p.quantity > 1 ? ` (${p.quantity}x)` : ''}</span>
+                                                        </label>`;
+                                                    })}</div>` : html`<span className="text-slate-400">—</span>`}
                                                 </div>
                                             </div>
                                             ${currentOs.observations ? html`<div className="mt-3"><div className="font-semibold text-slate-700 mb-1 text-sm"><i className="ph-bold ph-note"></i> Observações</div><div className="text-sm text-slate-600 whitespace-pre-wrap">${currentOs.observations}</div></div>` : ''}
@@ -8164,7 +8375,10 @@ HTML_PAGE = """
                                             ${currentOs.parts.some(p => p.substituida) && html`
                                                 <div className="mt-3 flex items-center justify-between gap-2 bg-amber-50 border border-amber-200 rounded-lg p-3">
                                                     <span className="text-xs text-amber-800">Registros de troca (nº de série + fotos) ficam salvos para rastreabilidade de garantia.</span>
-                                                    <button onClick=${salvarSubstituicoes} className="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg font-medium text-sm whitespace-nowrap"><i className="ph-bold ph-floppy-disk"></i> Salvar substituições</button>
+                                                    <div className="flex gap-2 flex-wrap">
+                                            <button onClick=${gerarPdfSubstituicoes} className="bg-slate-700 hover:bg-slate-800 text-white px-4 py-2 rounded-lg font-medium text-sm whitespace-nowrap flex items-center gap-1"><i className="ph-bold ph-file-pdf"></i> PDF das peças</button>
+                                            <button onClick=${salvarSubstituicoes} className="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg font-medium text-sm whitespace-nowrap"><i className="ph-bold ph-floppy-disk"></i> Salvar substituições</button>
+                                        </div>
                                                 </div>
                                             `}
                                         </div>
@@ -8262,7 +8476,7 @@ HTML_PAGE = """
                                                                 ${servicoResults.map(sr => html`
                                                                     <button key=${sr.id} onClick=${() => { updateService(i, { omieServiceId: sr.id, code: sr.code, description: sr.description, unitPrice: sr.unitPrice || s.unitPrice, cTribServ: sr.cTribServ, cCodServMun: sr.cCodServMun, cCodLC116: sr.cCodLC116, cCodCateg: sr.cCodCateg }); setServicoSearch({ q: '', forIndex: null }); setServicoResults([]); }} className="w-full text-left p-2 text-sm hover:bg-blue-50">
                                                                         <div className="font-medium">${sr.code} — ${sr.description}</div>
-                                                                        <div className="text-xs text-slate-500">R$ ${(sr.unitPrice || 0).toFixed(2)}</div>
+                                                                        ${verValores && html`<div className="text-xs text-slate-500">R$ ${(sr.unitPrice || 0).toFixed(2)}</div>`}
                                                                     </button>
                                                                 `)}
                                                             </div>
@@ -8271,9 +8485,11 @@ HTML_PAGE = """
                                                         <div className="flex gap-2 items-center">
                                                             <label className="text-xs text-slate-600">Qtd</label>
                                                             <input type="number" min="0" step="0.01" value=${s.quantity} onChange=${e => updateService(i, { quantity: e.target.value })} className="w-20 p-1.5 border border-slate-300 rounded text-sm" disabled=${isLocked} />
+                                                            ${verValores && html`
                                                             <label className="text-xs text-slate-600 ml-2">R$ unit.</label>
                                                             <input type="number" min="0" step="0.01" value=${s.unitPrice} onChange=${e => updateService(i, { unitPrice: e.target.value })} className="w-24 p-1.5 border border-slate-300 rounded text-sm" disabled=${isLocked} />
                                                             <div className="ml-auto text-sm font-bold text-slate-700">= R$ ${((parseFloat(s.quantity)||0) * (parseFloat(s.unitPrice)||0)).toFixed(2)}</div>
+                                                            `}
                                                         </div>
                                                     </div>
                                                     ${!isLocked && html`<button onClick=${() => removeService(i)} className="text-red-500 hover:bg-red-50 p-2 rounded"><i className="ph-bold ph-trash"></i></button>`}
@@ -8307,7 +8523,7 @@ HTML_PAGE = """
                                                                 ${produtoResults.map(pr => html`
                                                                     <button key=${pr.id} onClick=${() => { updatePart(i, { omieProductId: pr.id, code: pr.code, description: pr.description, unitPrice: pr.unitPrice || p.unitPrice }); setProdutoSearch({ q: '', forIndex: null }); setProdutoResults([]); }} className="w-full text-left p-2 text-sm hover:bg-blue-50">
                                                                         <div className="font-medium">${pr.code} — ${pr.description}</div>
-                                                                        <div className="text-xs text-slate-500">${pr.unit || ''} | R$ ${(pr.unitPrice || 0).toFixed(2)}</div>
+                                                                        <div className="text-xs text-slate-500">${pr.unit || ''}${verValores ? ` | R$ ${(pr.unitPrice || 0).toFixed(2)}` : ''}</div>
                                                                     </button>
                                                                 `)}
                                                             </div>
@@ -8316,9 +8532,11 @@ HTML_PAGE = """
                                                         <div className="flex gap-2 items-center">
                                                             <label className="text-xs text-slate-600">Qtd</label>
                                                             <input type="number" min="0" step="0.01" value=${p.quantity} onChange=${e => updatePart(i, { quantity: e.target.value })} className="w-20 p-1.5 border border-slate-300 rounded text-sm" disabled=${isLocked} />
+                                                            ${verValores && html`
                                                             <label className="text-xs text-slate-600 ml-2">R$ unit.</label>
                                                             <input type="number" min="0" step="0.01" value=${p.unitPrice} onChange=${e => updatePart(i, { unitPrice: e.target.value })} className="w-24 p-1.5 border border-slate-300 rounded text-sm" disabled=${isLocked} />
                                                             <div className="ml-auto text-sm font-bold text-slate-700">= R$ ${((parseFloat(p.quantity)||0) * (parseFloat(p.unitPrice)||0)).toFixed(2)}</div>
+                                                            `}
                                                         </div>
                                                         ${substituicaoControles(p, i)}
                                                     </div>
@@ -8331,7 +8549,10 @@ HTML_PAGE = """
                                 ${(currentOs.parts || []).some(p => p.substituida) && html`
                                     <div className="mt-3 flex items-center justify-between gap-2 bg-amber-50 border border-amber-200 rounded-lg p-3">
                                         <span className="text-xs text-amber-800">Registros de substituição (nº de série + fotos) ficam salvos para rastreabilidade de garantia.</span>
-                                        <button onClick=${salvarSubstituicoes} className="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg font-medium text-sm whitespace-nowrap"><i className="ph-bold ph-floppy-disk"></i> Salvar substituições</button>
+                                        <div className="flex gap-2 flex-wrap">
+                                            <button onClick=${gerarPdfSubstituicoes} className="bg-slate-700 hover:bg-slate-800 text-white px-4 py-2 rounded-lg font-medium text-sm whitespace-nowrap flex items-center gap-1"><i className="ph-bold ph-file-pdf"></i> PDF das peças</button>
+                                            <button onClick=${salvarSubstituicoes} className="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg font-medium text-sm whitespace-nowrap"><i className="ph-bold ph-floppy-disk"></i> Salvar substituições</button>
+                                        </div>
                                     </div>
                                 `}
                             </div>
@@ -8339,12 +8560,14 @@ HTML_PAGE = """
                             <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                                 <h3 className="text-lg font-semibold mb-3 text-slate-800 flex items-center gap-2"><i className="ph-fill ph-note text-blue-600 text-xl"></i> Observações</h3>
                                 <textarea value=${currentOs.observations || ''} onChange=${(e) => updateOs({ observations: e.target.value })} rows="4" disabled=${isLocked} className="w-full p-3 border border-slate-300 rounded outline-none focus:ring-2 focus:ring-blue-500"></textarea>
+                                ${verValores && html`
                                 <div className="mt-4 text-right">
                                     <div className="inline-block bg-slate-900 text-white px-6 py-3 rounded-lg">
                                         <div className="text-xs text-slate-300 uppercase">Total da OS</div>
                                         <div className="text-2xl font-bold">R$ ${osTotal(currentOs).toFixed(2)}</div>
                                     </div>
                                 </div>
+                                `}
                             </div>
                         </div>
                     `;
