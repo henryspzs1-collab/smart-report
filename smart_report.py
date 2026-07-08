@@ -4086,6 +4086,33 @@ def _gerar_pdf_laudo(payload):
             t.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP'), ('PADDING', (0,0), (-1,-1), 4)]))
             story.append(t)
 
+    # ---- Peças Substituídas (rastreabilidade de garantia) ----
+    pecas_sub = [p for p in (payload.get('pecasSubstituidas') or [])
+                 if isinstance(p, dict) and p.get('substituida')]
+    if pecas_sub:
+        story.append(Spacer(1, 4*mm))
+        story.append(secao('Peças Substituídas'))
+        story.append(Spacer(1, 2*mm))
+        rows = [[Paragraph('<b>Peça</b>', small), Paragraph('<b>Nº Série (retirada)</b>', small), Paragraph('<b>Nº Série (nova)</b>', small)]]
+        for p in pecas_sub:
+            nome = p.get('description') or p.get('code') or 'peça'
+            if p.get('temSerie'):
+                sa = p.get('serialAntigo') or '—'
+                sn = p.get('serialNovo') or '—'
+            else:
+                sa = 'sem série'
+                sn = 'sem série'
+            rows.append([Paragraph(_esc(str(nome)), body), Paragraph(_esc(str(sa)), body), Paragraph(_esc(str(sn)), body)])
+        t = Table(rows, colWidths=[80*mm, 50*mm, 50*mm])
+        t.setStyle(TableStyle([
+            ('GRID', (0,0), (-1,-1), 0.5, C_BORDER),
+            ('BACKGROUND', (0,0), (-1,0), C_LIGHT),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+            ('LEFTPADDING', (0,0), (-1,-1), 5), ('RIGHTPADDING', (0,0), (-1,-1), 5),
+            ('TOPPADDING', (0,0), (-1,-1), 4), ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+        ]))
+        story.append(t)
+
     # ---- Assinatura do Técnico (somente) ----
     if show_signatures:
         story.append(Spacer(1, 15*mm))
@@ -4189,6 +4216,10 @@ def os_gerar_pdf_anexar(os_id):
     garantia = draft.get('garantiaStatus') or ((payload.get('headerData') or {}).get('garantiaStatus')) or 'avulsa'
     payload.setdefault('headerData', {})
     payload['headerData']['garantiaStatus'] = garantia
+    # Injeta as peças SUBSTITUÍDAS (nº de série) pra a seção "Peças Substituídas" do laudo.
+    if 'pecasSubstituidas' not in payload:
+        payload['pecasSubstituidas'] = [p for p in (draft.get('parts') or [])
+                                        if isinstance(p, dict) and p.get('substituida')]
 
     try:
         pdf_bytes = _gerar_pdf_laudo(payload)
