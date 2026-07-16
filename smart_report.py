@@ -3707,6 +3707,9 @@ def _gerar_pdf_laudo(payload):
     story.append(rule)
     story.append(Spacer(1, 5*mm))
 
+    def _esc(s):
+        return (str(s) if s is not None else '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br/>')
+
     # ---- Informações Gerais ----
     story.append(secao('Informações Gerais'))
     story.append(Spacer(1, 2*mm))
@@ -3714,9 +3717,13 @@ def _gerar_pdf_laudo(payload):
     for f in header_config:
         label = f.get('label', '')
         val = header_data.get(f.get('id', ''), '') or '-'
-        info_rows.append([Paragraph(f"<b>{label}</b>", body), Paragraph(str(val).replace('\n', '<br/>'), body)])
+        info_rows.append([Paragraph(f"<b>{_esc(label)}</b>", body), Paragraph(_esc(val), body)])
     if info_rows:
-        info_table = Table(info_rows, colWidths=[55*mm, 125*mm])
+        # splitInRow=1: campos de texto livre (ex.: "Defeito Alegado pelo Cliente") podem
+        # ficar MAIORES que a página inteira. O ReportLab só quebra tabela por LINHA, então
+        # uma linha mais alta que a moldura estourava com LayoutError "too large on page".
+        # splitInRow deixa a própria linha quebrar entre páginas.
+        info_table = Table(info_rows, colWidths=[55*mm, 125*mm], splitByRow=1, splitInRow=1)
         info_style = [
             ('LINEBELOW', (0,0), (-1,-1), 0.4, C_BORDER),
             ('BACKGROUND', (0,0), (0,-1), C_LIGHT),
@@ -3728,9 +3735,6 @@ def _gerar_pdf_laudo(payload):
         info_table.setStyle(TableStyle(info_style))
         story.append(info_table)
     story.append(Spacer(1, 5*mm))
-
-    def _esc(s):
-        return (str(s) if s is not None else '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br/>')
 
     # ---- Checklist ----
     if questions:
