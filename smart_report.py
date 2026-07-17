@@ -7949,6 +7949,19 @@ HTML_PAGE = """
                     }).then(r => r.json()).then(d => { if(d.success) fetchUsers(); });
                 };
 
+                // Troca o nível de acesso (user <-> admin). O backend só aceita de admin,
+                // valida o papel e IMPEDE rebaixar a si mesmo (para nunca ficar sem admin);
+                // aqui o select do próprio usuário já vem desabilitado.
+                const trocarRoleUsuario = (u, novoRole) => {
+                    if (novoRole === u.role) return;
+                    const nome = (u.firstName ? `${u.firstName} ${u.lastName || ''}`.trim() : u.username);
+                    const aviso = novoRole === 'admin'
+                        ? `Tornar ${nome} ADMIN?\\n\\nAdmin vê valores e totais, edita Templates/Modelos, gerencia usuários e configurações do sistema.`
+                        : `Tornar ${nome} usuário PADRÃO?\\n\\nEle perde o acesso a Templates, Usuários, Relatórios e deixa de ver os valores.`;
+                    if (!confirm(aviso)) { fetchUsers(); return; }   // refetch: devolve o select ao valor real
+                    callUserAction(u.username, 'role', { body: { role: novoRole } });
+                };
+
                 const callUserAction = (username, action, opts = {}) => {
                     fetch(`/api/users/${encodeURIComponent(username)}/${action}`, {
                         method: 'POST',
@@ -8082,7 +8095,18 @@ HTML_PAGE = """
                                                     ${u.phone && html`<div><i className="ph ph-phone"></i> ${u.phone}</div>`}
                                                 </td>
                                                 <td className="p-3">
-                                                    <span className=${`px-2 py-0.5 rounded text-xs font-bold ${u.role==='admin'?'bg-indigo-100 text-indigo-700':'bg-slate-200 text-slate-700'}`}>${u.role.toUpperCase()}</span>
+                                                    ${(() => {
+                                                        const euMesmo = u.username === auth.username;
+                                                        return html`
+                                                            <select value=${u.role}
+                                                                disabled=${euMesmo}
+                                                                title=${euMesmo ? 'Você não pode alterar o seu próprio nível de acesso' : 'Alterar nível de acesso'}
+                                                                onChange=${e => trocarRoleUsuario(u, e.target.value)}
+                                                                className=${`px-2 py-1 rounded text-xs font-bold border outline-none ${euMesmo ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'} ${u.role === 'admin' ? 'bg-indigo-100 text-indigo-700 border-indigo-300' : 'bg-slate-200 text-slate-700 border-slate-300'}`}>
+                                                                <option value="user">USER</option>
+                                                                <option value="admin">ADMIN</option>
+                                                            </select>`;
+                                                    })()}
                                                 </td>
                                                 <td className="p-3">
                                                     <div className="flex flex-wrap gap-1">
