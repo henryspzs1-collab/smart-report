@@ -333,6 +333,17 @@ DEFAULT_HEADER_CONFIG = [
     {"id": "defect", "label": "Defeito Alegado pelo Cliente", "type": "textarea"}
 ]
 
+# Checklist de TESTES da aba "Teste e Liberação" (global, editável pelo admin em
+# Templates). Isto é só um ponto de partida — a equipe ajusta os itens pela própria UI.
+DEFAULT_TESTES_CHECKLIST = [
+    {"id": "t_liga", "label": "Equipamento liga e opera normalmente"},
+    {"id": "t_carga", "label": "Teste de carga / descarga concluído"},
+    {"id": "t_comunicacao", "label": "Comunicação / leitura de dados OK"},
+    {"id": "t_aquecimento", "label": "Sem aquecimento ou ruído anormal"},
+    {"id": "t_vedacao", "label": "Vedação e fixação conferidas"},
+    {"id": "t_limpeza", "label": "Limpeza e acabamento final"},
+]
+
 
 def load_data():
     data = {}
@@ -661,6 +672,10 @@ def get_data():
     # Mandamos só id+name (estrutura), e as imagens são carregadas DEPOIS, sem bloquear o
     # "Carregando dados", pelo endpoint GET /api/diagrams. (O merge do POST preserva o base64.)
     gc = full_data['globalConfig']
+    # Bases antigas não têm a lista de testes ainda -> devolve o padrão (o admin edita
+    # depois em Templates e o autosave passa a gravar a lista dele).
+    if not gc.get('testesChecklist'):
+        gc = {**gc, "testesChecklist": DEFAULT_TESTES_CHECKLIST}
     gc_light = {**gc, "models": [
         {**m, "diagrams": [{k: v for k, v in d.items() if k != 'imageBase64'} for d in (m.get('diagrams') or [])]}
         for m in (gc.get('models') or [])
@@ -723,11 +738,12 @@ def update_data():
                     d['imageBase64'] = prev['imageBase64']
                 elif d.get('imageBase64') == _diagrama_leve(prev['imageBase64']):
                     d['imageBase64'] = prev['imageBase64']
-        # PRESERVA flags que um frontend em cache pode não reenviar (não apagar a flag).
-        if 'faturarPeloRobo' not in new_gc:
-            prev_flag = (full_data.get('globalConfig') or {}).get('faturarPeloRobo')
-            if prev_flag is not None:
-                new_gc['faturarPeloRobo'] = prev_flag
+        # PRESERVA flags/config que um frontend em cache pode não reenviar (não apagar).
+        for _chave in ('faturarPeloRobo', 'testesChecklist'):
+            if _chave not in new_gc:
+                _prev = (full_data.get('globalConfig') or {}).get(_chave)
+                if _prev is not None:
+                    new_gc[_chave] = _prev
         full_data['globalConfig'] = new_gc
 
     save_data(full_data)
@@ -2945,6 +2961,13 @@ def os_exec_checklist(os_id):
         draft['checklistServicos'] = [bool(x) for x in body['checklistServicos']]
     if isinstance(body.get('checklistPecas'), list):
         draft['checklistPecas'] = [bool(x) for x in body['checklistPecas']]
+    # Checklist de TESTES (aba "Teste e Liberação"). Mapa {idDoItem: bool} em vez de lista
+    # por índice: a lista de testes é global e o admin pode editá-la, então índice sairia
+    # do lugar; o id mantém o registro certo mesmo se a lista mudar depois.
+    if isinstance(body.get('checklistTestes'), dict):
+        draft['checklistTestes'] = {str(k): bool(v) for k, v in body['checklistTestes'].items()}
+    if isinstance(body.get('obsTeste'), str):
+        draft['obsTeste'] = body['obsTeste']
     draft['updatedAt'] = datetime.utcnow().isoformat() + "Z"
     save_data(full_data)
     return jsonify({"success": True})
@@ -5092,6 +5115,7 @@ HTML_PAGE = """
             const [models, setModels] = useState([]);
             const [logo, setLogo] = useState(null);
             const [faturarPeloRobo, setFaturarPeloRobo] = useState(false);
+            const [testesChecklist, setTestesChecklist] = useState([]);   // itens do teste (global, admin edita)
             const [roboTokens, setRoboTokens] = useState([]);
             const [filaRobo, setFilaRobo] = useState(null);   // {pendentes, recentes} — painel da fila do robô
             const [filaRoboTs, setFilaRoboTs] = useState(null);      // horário da última atualização (feedback)
@@ -5137,6 +5161,11 @@ HTML_PAGE = """
             const [execOs, setExecOs] = useState(null);
             const [execCarregando, setExecCarregando] = useState(false);
             const [execPecasSalvando, setExecPecasSalvando] = useState(false);
+            // Aba "Teste e Liberação" (execEstado === 'aguardando_teste')
+            const [testeAbertaId, setTesteAbertaId] = useState(null);
+            const [testeMotivo, setTesteMotivo] = useState('');
+            const [testeReprovando, setTesteReprovando] = useState(false);
+            const [testeLiberando, setTesteLiberando] = useState(false);
             const [currentOs, setCurrentOs] = useState(null);
             const [corrigindo, setCorrigindo] = useState(false);   // modo "Corrigir OS" (destrava OS enviada p/ refaturar)
             const [salvandoCorrecao, setSalvandoCorrecao] = useState(false);
@@ -5187,6 +5216,7 @@ HTML_PAGE = """
                         setModels(loadedModels);
                         setLogo(data.globalConfig.logo || null);
                         setFaturarPeloRobo(!!data.globalConfig.faturarPeloRobo);
+                        setTestesChecklist(data.globalConfig.testesChecklist || []);
                         if (data.role === 'admin') fetchRoboTokens();
 
                         // Aplica Estado do Laudo (Isolado do Usuário)
@@ -5237,7 +5267,7 @@ HTML_PAGE = """
 
                     // Se for admin, salva as configurações globais também
                     if (auth.role === 'admin') {
-                        payload.globalConfig = { headerConfig, models, logo, faturarPeloRobo };
+                        payload.globalConfig = { headerConfig, models, logo, faturarPeloRobo, testesChecklist };
                     }
 
                     fetch('/api/data', {
@@ -5253,7 +5283,7 @@ HTML_PAGE = """
                     });
                 }, 1000);
                 return () => clearTimeout(timer);
-            }, [headerConfig, headerData, models, answers, diagramMarks, logo, faturarPeloRobo, reportImages, pdfMargin, cellVoltages, motorResistances, isLoaded, auth]);
+            }, [headerConfig, headerData, models, answers, diagramMarks, logo, faturarPeloRobo, testesChecklist, reportImages, pdfMargin, cellVoltages, motorResistances, isLoaded, auth]);
 
             // Salva status temp de fotos antes da câmera abrir
             useEffect(() => {
@@ -5357,7 +5387,7 @@ HTML_PAGE = """
             useEffect(() => {
                 // A aba "Serviços a executar" sai da mesma lista de OS (filtrada pela fase),
                 // por isso ela também dispara o fetch. O resto é específico da aba de OS.
-                if (auth && (activeTab === 'os' || activeTab === 'executar')) {
+                if (auth && ['os', 'executar', 'teste', 'historico'].includes(activeTab)) {
                     fetchOsDrafts();
                 }
                 if (auth && activeTab === 'os') {
@@ -7514,6 +7544,27 @@ HTML_PAGE = """
                         </div>
 
                         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                            <h2 className="text-xl font-semibold mb-1 text-slate-800 flex items-center gap-2">
+                                <i className="ph-fill ph-test-tube text-cyan-500 text-2xl"></i> Checklist de Testes
+                            </h2>
+                            <p className="text-sm text-slate-500 mb-4">Itens que o técnico marca na aba <b>Teste e Liberação</b>, antes de liberar o equipamento. Vale para todos os modelos.</p>
+                            <div className="space-y-2">
+                                ${(testesChecklist || []).map((t, i) => html`
+                                    <div key=${t.id} className="flex items-center gap-2">
+                                        <i className="ph-bold ph-check-square text-cyan-500 flex-shrink-0"></i>
+                                        <input type="text" value=${t.label} onInput=${e => setTestesChecklist(testesChecklist.map((x, idx) => idx === i ? { ...x, label: e.target.value } : x))} className="flex-1 p-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-cyan-500" />
+                                        <button onClick=${() => setTestesChecklist(testesChecklist.filter((_, idx) => idx !== i))} className="text-red-500 hover:text-red-700 p-2" title="Remover item"><i className="ph-bold ph-trash"></i></button>
+                                    </div>
+                                `)}
+                                ${!(testesChecklist || []).length ? html`<p className="text-sm text-slate-400 italic">Nenhum item — a aba de teste vai avisar o técnico.</p>` : ''}
+                            </div>
+                            <button onClick=${() => setTestesChecklist([...(testesChecklist || []), { id: 't_' + Date.now(), label: 'Novo teste' }])} className="mt-3 bg-cyan-50 hover:bg-cyan-100 text-cyan-700 px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-1">
+                                <i className="ph-bold ph-plus"></i> Adicionar item de teste
+                            </button>
+                            <p className="text-xs text-slate-400 mt-2">⚠️ Remover um item não apaga os testes já registrados no histórico.</p>
+                        </div>
+
+                        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                             <h2 className="text-xl font-semibold mb-1 text-slate-800 flex items-center gap-2"><i className="ph-fill ph-robot text-amber-600 text-2xl"></i> Faturamento</h2>
                             <label className="flex items-start gap-3 mt-3 cursor-pointer">
                                 <input type="checkbox" checked=${faturarPeloRobo} onChange=${e => setFaturarPeloRobo(e.target.checked)} className="mt-1 h-5 w-5 accent-amber-600" />
@@ -8187,6 +8238,247 @@ HTML_PAGE = """
                 `;
             };
 
+            // ---- Aba "Teste e Liberação" ---------------------------------------------
+            // Depois de "Finalizar serviço", o equipamento cai aqui pra ser testado. O técnico
+            // roda o checklist de testes (lista global, o admin edita em Templates), escreve a
+            // observação e decide: REPROVA (motivo obrigatório -> volta pra bancada) ou LIBERA
+            // (o backend exige execEstado='aprovado' e aí o crm-finalizar move a oportunidade
+            // pra "04 Finalizadas" no Omie e registra o teste nas observações de lá).
+            const testeSalvarCampos = async (osId, patch) => {
+                try {
+                    await fetch(`/api/os/${osId}/exec-checklist`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                        body: JSON.stringify(patch)
+                    });
+                } catch (e) {}
+            };
+
+            const testeToggle = (o, itemId) => {
+                const atual = { ...(o.checklistTestes || {}) };
+                atual[itemId] = !atual[itemId];
+                setOsDrafts(prev => prev.map(d => d.id === o.id ? { ...d, checklistTestes: atual } : d));
+                testeSalvarCampos(o.id, { checklistTestes: atual });
+            };
+
+            const testeSetObs = (o, texto) => {
+                setOsDrafts(prev => prev.map(d => d.id === o.id ? { ...d, obsTeste: texto } : d));
+            };
+
+            const testeReprovar = async (o) => {
+                const motivo = (testeMotivo || '').trim();
+                if (!motivo) { alert('Escreva o motivo do teste não ter passado.'); return; }
+                setTesteReprovando(true);
+                try {
+                    await testeSalvarCampos(o.id, { obsTeste: o.obsTeste || '' });
+                    const r = await fetch(`/api/os/${o.id}/execucao`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                        body: JSON.stringify({ estado: 'reprovado', motivo })
+                    });
+                    const d = await r.json();
+                    if (d && d.id) {
+                        setTesteMotivo(''); setTesteAbertaId(null);
+                        fetchOsDrafts();
+                        alert('Teste reprovado. O serviço voltou para "Serviços a executar" com o motivo registrado.');
+                        setActiveTab('executar');
+                    } else alert('Erro: ' + (d.error || 'falha ao reprovar'));
+                } catch (e) { alert('Erro de rede: ' + (e.message || e)); }
+                finally { setTesteReprovando(false); }
+            };
+
+            const testeLiberar = async (o) => {
+                if (!confirm('Liberar o equipamento?\\n\\nO teste será registrado como APROVADO e a oportunidade vai para "04 Finalizadas" no Omie.')) return;
+                setTesteLiberando(true);
+                try {
+                    await testeSalvarCampos(o.id, { obsTeste: o.obsTeste || '' });
+                    const r = await fetch(`/api/os/${o.id}/execucao`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                        body: JSON.stringify({ estado: 'aprovado' })
+                    });
+                    const d = await r.json();
+                    if (!d || !d.id) { alert('Erro: ' + ((d && d.error) || 'falha ao aprovar')); return; }
+                    // Aprovado -> agora o crm-finalizar aceita mover a fase no Omie.
+                    const r2 = await fetch(`/api/os/${o.id}/crm-finalizar`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                        body: JSON.stringify({})
+                    });
+                    const d2 = await r2.json();
+                    setTesteAbertaId(null);
+                    fetchOsDrafts();
+                    if (d2 && d2.success) {
+                        alert('Equipamento liberado!' + (d2.faseMovida
+                            ? `\\n\\nOportunidade movida para "${d2.faseNova || '04 Finalizadas'}" no Omie.`
+                            : `\\n\\nATENÇÃO: ${d2.warning || 'a fase no Omie não foi movida — verifique.'}`));
+                    } else {
+                        alert('Teste aprovado, mas falhou ao finalizar no Omie: ' + ((d2 && d2.error) || 'erro desconhecido'));
+                    }
+                    setActiveTab('historico');
+                } catch (e) { alert('Erro de rede: ' + (e.message || e)); }
+                finally { setTesteLiberando(false); }
+            };
+
+            const renderTesteLiberacao = () => {
+                const lista = (osDrafts || []).filter(o => o.execEstado === 'aguardando_teste');
+                const itens = testesChecklist || [];
+                return html`
+                    <div className="space-y-4">
+                        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                            <h2 className="text-xl font-semibold text-slate-800 flex items-center gap-2">
+                                <i className="ph-fill ph-test-tube text-cyan-500 text-2xl"></i> Teste e Liberação
+                                <span className="text-sm font-normal text-slate-400">(${lista.length} aguardando teste)</span>
+                            </h2>
+                            <p className="text-sm text-slate-500 mt-1">Serviços finalizados na bancada, aguardando o teste final antes de liberar o equipamento.</p>
+                        </div>
+
+                        ${!lista.length ? html`
+                            <div className="bg-white p-10 rounded-xl shadow-sm border border-slate-200 text-center text-slate-400">
+                                <i className="ph ph-check-circle text-5xl mb-2"></i>
+                                <p>Nenhum equipamento aguardando teste.</p>
+                            </div>
+                        ` : lista.map(o => {
+                            const aberta = testeAbertaId === o.id;
+                            const marcados = itens.filter(t => (o.checklistTestes || {})[t.id]).length;
+                            const tudoOk = itens.length > 0 && marcados === itens.length;
+                            return html`
+                                <div key=${o.id} className="bg-white rounded-xl shadow-sm border ${tudoOk ? 'border-emerald-300' : 'border-slate-200'} overflow-hidden">
+                                    <button onClick=${() => { setTesteAbertaId(aberta ? null : o.id); setTesteMotivo(''); }} className="w-full p-4 flex items-center justify-between gap-3 hover:bg-slate-50 text-left">
+                                        <div className="min-w-0">
+                                            <div className="font-semibold text-slate-800 truncate">${(o.client && o.client.name) || 'Sem cliente'}</div>
+                                            <div className="text-xs text-slate-500 truncate">
+                                                ${o.crmOpNum ? html`<span className="font-mono">${o.crmOpNum}</span> · ` : ''}
+                                                ${(o.fromLaudo && o.fromLaudo.model) || 'Equipamento'}
+                                                ${o.omieOsNumber ? html` · OS ${o.omieOsNumber}` : ''}
+                                            </div>
+                                        </div>
+                                        <div className="flex items-center gap-3 flex-shrink-0">
+                                            <span className=${`text-xs font-bold px-2 py-1 rounded-full ${tudoOk ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>${marcados}/${itens.length}</span>
+                                            <i className=${`ph-bold ${aberta ? 'ph-caret-up' : 'ph-caret-down'} text-slate-400`}></i>
+                                        </div>
+                                    </button>
+
+                                    ${aberta && html`
+                                        <div className="border-t border-slate-200 p-4 space-y-5">
+                                            <div>
+                                                <h3 className="text-sm font-bold text-slate-700 mb-2 flex items-center gap-1"><i className="ph-fill ph-list-checks text-cyan-600"></i> Testes e verificações</h3>
+                                                ${!itens.length ? html`
+                                                    <p className="text-xs text-amber-600">Nenhum item de teste configurado. ${auth.role === 'admin' ? 'Configure em Templates (Global) → Checklist de Testes.' : 'Peça ao admin para configurar em Templates.'}</p>
+                                                ` : html`
+                                                    <div className="space-y-1">
+                                                        ${itens.map(t => {
+                                                            const feito = !!(o.checklistTestes || {})[t.id];
+                                                            return html`
+                                                                <label key=${t.id} className="flex items-start gap-2 p-2 rounded-lg bg-white border border-slate-200 cursor-pointer hover:border-cyan-300">
+                                                                    <input type="checkbox" checked=${feito} onChange=${() => testeToggle(o, t.id)} className="mt-0.5 h-4 w-4 accent-emerald-600 flex-shrink-0" />
+                                                                    <span className=${`text-sm ${feito ? 'line-through text-slate-400' : 'text-slate-700'}`}>${t.label}</span>
+                                                                </label>`;
+                                                        })}
+                                                    </div>
+                                                `}
+                                            </div>
+
+                                            <div>
+                                                <h3 className="text-sm font-bold text-slate-700 mb-2 flex items-center gap-1"><i className="ph-fill ph-note text-slate-500"></i> Observação geral do teste</h3>
+                                                <textarea value=${o.obsTeste || ''} onInput=${e => testeSetObs(o, e.target.value)} onBlur=${e => testeSalvarCampos(o.id, { obsTeste: e.target.value })} rows="3" placeholder="Como o equipamento se comportou no teste, medições, ressalvas…" className="w-full p-3 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-cyan-500"></textarea>
+                                            </div>
+
+                                            ${testeReprovando || !aberta ? '' : html`
+                                                <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                                                    <label className="text-xs font-bold text-red-700 uppercase block mb-1">Se o teste NÃO passou, escreva o motivo</label>
+                                                    <textarea value=${testeMotivo} onInput=${e => setTesteMotivo(e.target.value)} rows="2" placeholder="O que deu errado? (obrigatório para reprovar)" className="w-full p-2 border border-red-300 rounded text-sm outline-none focus:ring-2 focus:ring-red-400"></textarea>
+                                                </div>
+                                            `}
+
+                                            <div className="border-t border-slate-200 pt-4 flex items-center justify-between gap-3 flex-wrap">
+                                                <button onClick=${() => testeReprovar(o)} disabled=${testeReprovando || !testeMotivo.trim()} className="bg-red-600 hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed text-white px-4 py-2.5 rounded-lg font-bold text-sm flex items-center gap-2">
+                                                    <i className="ph-bold ph-arrow-u-left-back"></i> ${testeReprovando ? 'Reprovando…' : 'Reprovar e voltar p/ execução'}
+                                                </button>
+                                                <button onClick=${() => testeLiberar(o)} disabled=${testeLiberando} className="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg font-bold text-sm flex items-center gap-2 shadow-md">
+                                                    <i className="ph-bold ph-seal-check"></i> ${testeLiberando ? 'Liberando…' : 'Aprovar e liberar'}
+                                                </button>
+                                            </div>
+                                            <p className="text-xs text-slate-400 text-center">Aprovar move a oportunidade para "04 Finalizadas" no Omie.</p>
+                                        </div>
+                                    `}
+                                </div>`;
+                        })}
+                    </div>`;
+            };
+
+            // ---- Aba "Histórico" (equipamentos liberados) ----------------------------
+            const renderHistorico = () => {
+                const lista = (osDrafts || [])
+                    .filter(o => o.execEstado === 'aprovado')
+                    .sort((a, b) => (b.execTestadoAt || '').localeCompare(a.execTestadoAt || ''));
+                const itens = testesChecklist || [];
+                const dataBr = (iso) => { try { return new Date(iso).toLocaleString('pt-BR'); } catch (e) { return iso || '—'; } };
+                return html`
+                    <div className="space-y-4">
+                        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                            <h2 className="text-xl font-semibold text-slate-800 flex items-center gap-2">
+                                <i className="ph-fill ph-clock-counter-clockwise text-emerald-600 text-2xl"></i> Histórico
+                                <span className="text-sm font-normal text-slate-400">(${lista.length} liberados)</span>
+                            </h2>
+                            <p className="text-sm text-slate-500 mt-1">Equipamentos com teste aprovado e liberados.</p>
+                        </div>
+
+                        ${!lista.length ? html`
+                            <div className="bg-white p-10 rounded-xl shadow-sm border border-slate-200 text-center text-slate-400">
+                                <i className="ph ph-archive text-5xl mb-2"></i>
+                                <p>Nenhum equipamento liberado ainda.</p>
+                            </div>
+                        ` : lista.map(o => {
+                            const aberta = testeAbertaId === 'h_' + o.id;
+                            const feitos = itens.filter(t => (o.checklistTestes || {})[t.id]);
+                            return html`
+                                <div key=${o.id} className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                                    <button onClick=${() => setTesteAbertaId(aberta ? null : 'h_' + o.id)} className="w-full p-4 flex items-center justify-between gap-3 hover:bg-slate-50 text-left">
+                                        <div className="min-w-0">
+                                            <div className="font-semibold text-slate-800 truncate flex items-center gap-2">
+                                                <i className="ph-fill ph-seal-check text-emerald-500"></i> ${(o.client && o.client.name) || 'Sem cliente'}
+                                            </div>
+                                            <div className="text-xs text-slate-500 truncate">
+                                                ${o.crmOpNum ? html`<span className="font-mono">${o.crmOpNum}</span> · ` : ''}
+                                                ${(o.fromLaudo && o.fromLaudo.model) || 'Equipamento'}
+                                                ${o.omieOsNumber ? html` · OS ${o.omieOsNumber}` : ''}
+                                            </div>
+                                        </div>
+                                        <div className="flex items-center gap-3 flex-shrink-0">
+                                            <span className="text-xs text-slate-400 whitespace-nowrap hidden md:inline">${dataBr(o.execTestadoAt)}</span>
+                                            <span className="text-xs font-bold px-2 py-1 rounded-full bg-emerald-100 text-emerald-700">Liberado</span>
+                                            <i className=${`ph-bold ${aberta ? 'ph-caret-up' : 'ph-caret-down'} text-slate-400`}></i>
+                                        </div>
+                                    </button>
+                                    ${aberta && html`
+                                        <div className="border-t border-slate-200 p-4 space-y-3 text-sm">
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs text-slate-500">
+                                                <div><b>Serviço concluído:</b> ${dataBr(o.execConcluidaAt)}</div>
+                                                <div><b>Teste aprovado:</b> ${dataBr(o.execTestadoAt)}</div>
+                                                ${o.crmFinalizadoAt ? html`<div><b>Finalizado no Omie:</b> ${dataBr(o.crmFinalizadoAt)}</div>` : ''}
+                                            </div>
+                                            ${feitos.length ? html`
+                                                <div>
+                                                    <div className="text-xs font-bold text-slate-600 uppercase mb-1">Testes realizados</div>
+                                                    <ul className="list-disc list-inside text-slate-600 text-xs space-y-0.5">
+                                                        ${feitos.map(t => html`<li key=${t.id}>${t.label}</li>`)}
+                                                    </ul>
+                                                </div>
+                                            ` : ''}
+                                            ${o.obsTeste ? html`
+                                                <div>
+                                                    <div className="text-xs font-bold text-slate-600 uppercase mb-1">Observação do teste</div>
+                                                    <p className="text-slate-700 whitespace-pre-wrap bg-slate-50 border border-slate-200 rounded p-2 text-xs">${o.obsTeste}</p>
+                                                </div>
+                                            ` : ''}
+                                        </div>
+                                    `}
+                                </div>`;
+                        })}
+                    </div>`;
+            };
+
             // Controles de substituição de peça (nº de série da velha/nova + fotos).
             // GENÉRICO de propósito: recebe como alterar a peça (patch) e como anexar a foto
             // (foto), pra servir tanto a OS aberta quanto a área "Serviços a executar" —
@@ -8228,6 +8520,11 @@ HTML_PAGE = """
             // e, na peça trocada, ativa o registro de nº de série. Reusa os MESMOS endpoints
             // do painel Execução & Teste (exec-checklist e registrar-pecas) — nada novo no
             // backend. A lista vem sem as fotos das peças; ao abrir a OS buscamos a completa.
+            // Quem está na bancada: em preparação e ainda não foi pro teste (ou voltou reprovado).
+            // Fonte única — a lista e o badge da aba usam ESTA função (já tinham divergido).
+            const naBancada = (o) => o.crmFaseCodigo === FASE_PREPARACAO
+                && ['a_executar', 'reprovado'].includes(o.execEstado || 'a_executar');
+
             const execProgresso = (o) => {
                 const s = (o.services || []).length, p = (o.parts || []).length;
                 const fs = (o.checklistServicos || []).filter(Boolean).length;
@@ -8294,8 +8591,26 @@ HTML_PAGE = """
                 finally { setExecPecasSalvando(false); }
             };
 
+            // Manda o serviço pra bancada de teste (aba "Teste e Liberação").
+            const execFinalizarServico = async (o) => {
+                if (!confirm('Finalizar o serviço e enviar para "Teste e Liberação"?')) return;
+                try {
+                    const r = await fetch(`/api/os/${o.id}/execucao`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                        body: JSON.stringify({ estado: 'aguardando_teste' })
+                    });
+                    const d = await r.json();
+                    if (d && d.id) {
+                        setExecAbertaId(null); setExecOs(null);
+                        fetchOsDrafts();
+                        setActiveTab('teste');
+                    } else alert('Erro: ' + (d.error || 'falha ao finalizar'));
+                } catch (e) { alert('Erro de rede: ' + (e.message || e)); }
+            };
+
             const renderServicosExecutar = () => {
-                const lista = (osDrafts || []).filter(o => o.crmFaseCodigo === FASE_PREPARACAO);
+                const lista = (osDrafts || []).filter(naBancada);
                 return html`
                     <div className="space-y-4">
                         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
@@ -8316,8 +8631,9 @@ HTML_PAGE = """
                             const aberta = execAbertaId === o.id;
                             const os = aberta && execOs ? execOs : o;
                             const completo = prog.total > 0 && prog.feitos === prog.total;
+                            const reprovado = o.execEstado === 'reprovado';
                             return html`
-                                <div key=${o.id} className="bg-white rounded-xl shadow-sm border ${completo ? 'border-emerald-300' : 'border-slate-200'} overflow-hidden">
+                                <div key=${o.id} className="bg-white rounded-xl shadow-sm border ${reprovado ? 'border-red-300' : (completo ? 'border-emerald-300' : 'border-slate-200')} overflow-hidden">
                                     <button onClick=${() => abrirExec(o)} className="w-full p-4 flex items-center justify-between gap-3 hover:bg-slate-50 text-left">
                                         <div className="min-w-0">
                                             <div className="font-semibold text-slate-800 truncate">${(o.client && o.client.name) || 'Sem cliente'}</div>
@@ -8326,8 +8642,15 @@ HTML_PAGE = """
                                                 ${(o.fromLaudo && o.fromLaudo.model) || 'Equipamento'}
                                                 ${o.omieOsNumber ? html` · OS ${o.omieOsNumber}` : ''}
                                             </div>
+                                            ${reprovado && o.execMotivoReprova ? html`
+                                                <div className="text-xs text-red-600 mt-1 flex items-start gap-1">
+                                                    <i className="ph-fill ph-warning-circle flex-shrink-0 mt-0.5"></i>
+                                                    <span className="line-clamp-2">${o.execMotivoReprova}</span>
+                                                </div>
+                                            ` : ''}
                                         </div>
                                         <div className="flex items-center gap-3 flex-shrink-0">
+                                            ${reprovado ? html`<span className="text-xs font-bold px-2 py-1 rounded-full bg-red-100 text-red-700 whitespace-nowrap">Reprovado no teste</span>` : ''}
                                             <span className=${`text-xs font-bold px-2 py-1 rounded-full ${completo ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
                                                 ${prog.feitos}/${prog.total}
                                             </span>
@@ -8338,6 +8661,13 @@ HTML_PAGE = """
                                     ${aberta && html`
                                         <div className="border-t border-slate-200 p-4 space-y-5">
                                             ${execCarregando && html`<div className="text-xs text-slate-400 flex items-center gap-1"><i className="ph ph-spinner animate-spin"></i> carregando fotos…</div>`}
+
+                                            ${os.execEstado === 'reprovado' && os.execMotivoReprova ? html`
+                                                <div className="bg-red-50 border border-red-300 rounded-lg p-3">
+                                                    <div className="text-xs font-bold text-red-700 uppercase mb-1"><i className="ph-fill ph-warning-circle"></i> Reprovado no teste — corrigir</div>
+                                                    <p className="text-sm text-red-800 whitespace-pre-wrap">${os.execMotivoReprova}</p>
+                                                </div>
+                                            ` : ''}
 
                                             <div>
                                                 <h3 className="text-sm font-bold text-slate-700 mb-2 flex items-center gap-1"><i className="ph-fill ph-wrench text-blue-600"></i> Serviços</h3>
@@ -8386,6 +8716,17 @@ HTML_PAGE = """
                                                 </div>
                                                 <p className="text-xs text-slate-400 text-right -mt-3">As caixinhas salvam sozinhas. O nº de série e as fotos precisam deste botão.</p>
                                             ` : ''}
+
+                                            <div className="border-t border-slate-200 pt-4 flex items-center justify-between gap-3 flex-wrap">
+                                                <p className="text-xs text-slate-500">
+                                                    ${prog.total && prog.feitos < prog.total
+                                                        ? html`<i className="ph-bold ph-info text-amber-500"></i> Faltam ${prog.total - prog.feitos} item(ns) — dá pra finalizar assim mesmo.`
+                                                        : html`<i className="ph-bold ph-check-circle text-emerald-500"></i> Tudo marcado.`}
+                                                </p>
+                                                <button onClick=${() => execFinalizarServico(os)} className="bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-lg font-bold text-sm flex items-center gap-2 shadow-md">
+                                                    <i className="ph-bold ph-flag-checkered"></i> Finalizar serviço
+                                                </button>
+                                            </div>
                                         </div>
                                     `}
                                 </div>`;
@@ -9162,8 +9503,13 @@ HTML_PAGE = """
                             <button onClick=${() => setActiveTab('report')} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'report' ? 'bg-white text-blue-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}><i className="ph-bold ph-file-text"></i> Preencher Laudo</button>
                             <button onClick=${() => setActiveTab('executar')} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'executar' ? 'bg-white text-orange-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}>
                                 <i className="ph-bold ph-wrench"></i> Serviços a executar
-                                ${(() => { const n = (osDrafts || []).filter(o => o.crmFaseCodigo === FASE_PREPARACAO).length; return n ? html`<span className="bg-orange-500 text-white text-xs font-bold px-1.5 py-0.5 rounded-full">${n}</span>` : ''; })()}
+                                ${(() => { const n = (osDrafts || []).filter(naBancada).length; return n ? html`<span className="bg-orange-500 text-white text-xs font-bold px-1.5 py-0.5 rounded-full">${n}</span>` : ''; })()}
                             </button>
+                            <button onClick=${() => setActiveTab('teste')} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'teste' ? 'bg-white text-cyan-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}>
+                                <i className="ph-bold ph-test-tube"></i> Teste e Liberação
+                                ${(() => { const n = (osDrafts || []).filter(o => o.execEstado === 'aguardando_teste').length; return n ? html`<span className="bg-cyan-500 text-white text-xs font-bold px-1.5 py-0.5 rounded-full">${n}</span>` : ''; })()}
+                            </button>
+                            <button onClick=${() => setActiveTab('historico')} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'historico' ? 'bg-white text-emerald-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}><i className="ph-bold ph-clock-counter-clockwise"></i> Histórico</button>
                             <button onClick=${() => { setActiveTab('os'); setCurrentOs(null); }} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'os' ? 'bg-white text-indigo-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}><i className="ph-bold ph-clipboard-text"></i> Ordens de Serviço</button>
                             <button onClick=${() => setActiveTab('crm')} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'crm' ? 'bg-white text-amber-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}><i className="ph-bold ph-funnel"></i> Oportunidades (CRM)</button>
 
@@ -9177,6 +9523,8 @@ HTML_PAGE = """
                         <main>
                             ${activeTab === 'report' ? renderReportForm() : ''}
                             ${activeTab === 'executar' ? renderServicosExecutar() : ''}
+                            ${activeTab === 'teste' ? renderTesteLiberacao() : ''}
+                            ${activeTab === 'historico' ? renderHistorico() : ''}
                             ${activeTab === 'os' ? renderOS() : ''}
                             ${activeTab === 'crm' ? renderCRM() : ''}
                             ${activeTab === 'relatorios' && auth.role === 'admin' ? renderRelatorios() : ''}
