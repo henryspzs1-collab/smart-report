@@ -1876,8 +1876,10 @@ def crm_sync_fases():
     except OmieError as e:
         return jsonify({"error": f"Falha ao consultar o Omie: {e}"}), 502
 
+    # Itera as OS da FILIAL inteira (mesma fonte do GET /api/os) — não só as do usuário
+    # logado; senão as OS de outros técnicos ficavam com a fase velha e sumiam da bancada.
     atualizadas = 0
-    for draft in _user_drafts(full_data, user):
+    for _owner, draft in _all_filial_drafts(full_data, user):
         num = str(draft.get('crmOpNum') or '')
         cod = draft.get('crmOpId')
         nova = por_num.get(num)
