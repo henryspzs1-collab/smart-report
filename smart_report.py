@@ -5131,6 +5131,12 @@ HTML_PAGE = """
 
             // Estados de Ordens de Serviço (Omie)
             const [osDrafts, setOsDrafts] = useState([]);
+            // Aba "Serviços a executar" (só OS na fase 03 Em Preparação)
+            const FASE_PREPARACAO = 10843780552;
+            const [execAbertaId, setExecAbertaId] = useState(null);
+            const [execOs, setExecOs] = useState(null);
+            const [execCarregando, setExecCarregando] = useState(false);
+            const [execPecasSalvando, setExecPecasSalvando] = useState(false);
             const [currentOs, setCurrentOs] = useState(null);
             const [corrigindo, setCorrigindo] = useState(false);   // modo "Corrigir OS" (destrava OS enviada p/ refaturar)
             const [salvandoCorrecao, setSalvandoCorrecao] = useState(false);
@@ -5349,8 +5355,12 @@ HTML_PAGE = """
                     .catch(() => setOmieStatus({ checked: true, ok: false, configured: false, message: 'Erro de conexão' }));
             };
             useEffect(() => {
-                if (auth && activeTab === 'os') {
+                // A aba "Serviços a executar" sai da mesma lista de OS (filtrada pela fase),
+                // por isso ela também dispara o fetch. O resto é específico da aba de OS.
+                if (auth && (activeTab === 'os' || activeTab === 'executar')) {
                     fetchOsDrafts();
+                }
+                if (auth && activeTab === 'os') {
                     if (!omieStatus.checked) checkOmieStatus();
                     if (!currentOs) fetchOmieAbertas();
                 }
@@ -8177,6 +8187,212 @@ HTML_PAGE = """
                 `;
             };
 
+            // Controles de substituição de peça (nº de série da velha/nova + fotos).
+            // GENÉRICO de propósito: recebe como alterar a peça (patch) e como anexar a foto
+            // (foto), pra servir tanto a OS aberta quanto a área "Serviços a executar" —
+            // uma marcação só, sem risco das duas telas divergirem.
+            const controlesSubstituicao = (p, i, patch, foto) => html`
+                <div className="mt-3 pt-3 border-t border-dashed border-slate-300">
+                    <label className="flex items-center gap-2 cursor-pointer text-sm font-medium text-slate-700">
+                        <input type="checkbox" checked=${p.substituida || false} onChange=${e => patch(i, { substituida: e.target.checked })} className="w-4 h-4 text-amber-600" />
+                        <i className="ph-bold ph-arrows-left-right text-amber-600"></i> Peça substituída — registrar troca (nº de série)
+                    </label>
+                    ${p.substituida && html`
+                        <div className="mt-3">
+                            <div className="flex items-center gap-4 text-sm text-slate-600 mb-2">
+                                <span className="font-medium">Esta peça tem número de série?</span>
+                                <label className="flex items-center gap-1 cursor-pointer"><input type="radio" checked=${p.temSerie === true} onChange=${() => patch(i, { temSerie: true })} className="accent-emerald-600" /> Sim</label>
+                                <label className="flex items-center gap-1 cursor-pointer"><input type="radio" checked=${p.temSerie === false} onChange=${() => patch(i, { temSerie: false })} className="accent-emerald-600" /> Não</label>
+                            </div>
+                            ${p.temSerie === true ? html`
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                                    <div className="text-xs font-bold text-red-700 uppercase mb-1"><i className="ph-fill ph-wrench"></i> Peça retirada (velha)</div>
+                                    <input type="text" placeholder="Nº de série da peça velha" value=${p.serialAntigo || ''} onChange=${e => patch(i, { serialAntigo: e.target.value })} className="w-full p-1.5 border border-slate-300 rounded text-sm mb-2 font-mono" />
+                                    ${p.fotoSerialAntigo ? html`<div className="relative"><img src=${p.fotoSerialAntigo} className="w-full h-28 object-contain border rounded bg-white" /><button onClick=${() => patch(i, { fotoSerialAntigo: null })} className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-6 h-6 text-xs"><i className="ph ph-x"></i></button></div>` : html`<label className="flex items-center justify-center gap-1 text-xs bg-white border border-dashed border-red-300 rounded p-3 cursor-pointer text-red-600 hover:bg-red-50"><i className="ph-bold ph-camera"></i> Foto do nº de série<input type="file" accept="image/*" capture="environment" className="hidden" onChange=${e => foto(i, 'fotoSerialAntigo', e.target.files[0])} /></label>`}
+                                </div>
+                                <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3">
+                                    <div className="text-xs font-bold text-emerald-700 uppercase mb-1"><i className="ph-fill ph-seal-check"></i> Peça nova (instalada)</div>
+                                    <input type="text" placeholder="Nº de série da peça nova" value=${p.serialNovo || ''} onChange=${e => patch(i, { serialNovo: e.target.value })} className="w-full p-1.5 border border-slate-300 rounded text-sm mb-2 font-mono" />
+                                    ${p.fotoSerialNovo ? html`<div className="relative"><img src=${p.fotoSerialNovo} className="w-full h-28 object-contain border rounded bg-white" /><button onClick=${() => patch(i, { fotoSerialNovo: null })} className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-6 h-6 text-xs"><i className="ph ph-x"></i></button></div>` : html`<label className="flex items-center justify-center gap-1 text-xs bg-white border border-dashed border-emerald-300 rounded p-3 cursor-pointer text-emerald-600 hover:bg-emerald-50"><i className="ph-bold ph-camera"></i> Foto do nº de série<input type="file" accept="image/*" capture="environment" className="hidden" onChange=${e => foto(i, 'fotoSerialNovo', e.target.files[0])} /></label>`}
+                                </div>
+                            </div>
+                            ` : (p.temSerie === false ? html`<div className="text-xs text-slate-500 italic bg-slate-50 border border-slate-200 rounded p-2">Peça sem número de série — troca registrada sem serial.</div>` : html`<div className="text-xs text-amber-600"><i className="ph-bold ph-arrow-up"></i> Selecione se a peça tem número de série.</div>`)}
+                        </div>
+                    `}
+                </div>`;
+
+            // ---- Aba "Serviços a executar" -------------------------------------------
+            // Visão de bancada: lista SÓ as OS na fase "03 Em Preparação" e, em cada uma, o
+            // checklist do que foi vendido (serviços + peças). O técnico marca o que executou
+            // e, na peça trocada, ativa o registro de nº de série. Reusa os MESMOS endpoints
+            // do painel Execução & Teste (exec-checklist e registrar-pecas) — nada novo no
+            // backend. A lista vem sem as fotos das peças; ao abrir a OS buscamos a completa.
+            const execProgresso = (o) => {
+                const s = (o.services || []).length, p = (o.parts || []).length;
+                const fs = (o.checklistServicos || []).filter(Boolean).length;
+                const fp = (o.checklistPecas || []).filter(Boolean).length;
+                return { total: s + p, feitos: fs + fp };
+            };
+
+            const abrirExec = async (o) => {
+                if (execAbertaId === o.id) { setExecAbertaId(null); setExecOs(null); return; }
+                setExecAbertaId(o.id);
+                setExecOs(o);                 // mostra na hora a versão da lista (sem fotos)
+                setExecCarregando(true);
+                try {                          // e troca pela completa (com as fotos dos seriais)
+                    const r = await fetch(`/api/os/${o.id}`, { headers: { 'Authorization': auth.token } });
+                    const full = await r.json();
+                    if (full && full.id) setExecOs(full);
+                } catch (e) {}
+                setExecCarregando(false);
+            };
+
+            const execToggle = async (tipo, idx) => {
+                const key = tipo === 'servico' ? 'checklistServicos' : 'checklistPecas';
+                const base = tipo === 'servico' ? (execOs.services || []) : (execOs.parts || []);
+                const arr = base.map((_, i) => !!(execOs[key] || [])[i]);
+                arr[idx] = !arr[idx];
+                setExecOs(prev => ({ ...prev, [key]: arr }));
+                setOsDrafts(prev => prev.map(o => o.id === execOs.id ? { ...o, [key]: arr } : o));
+                try {
+                    await fetch(`/api/os/${execOs.id}/exec-checklist`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                        body: JSON.stringify({ [key]: arr })
+                    });
+                } catch (e) {}
+            };
+
+            const execPatchPeca = (i, patch) => setExecOs(prev => ({
+                ...prev, parts: (prev.parts || []).map((p, idx) => idx === i ? { ...p, ...patch } : p)
+            }));
+            const execFotoPeca = (i, campo, file) => {
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = async () => {
+                    let src = reader.result;
+                    try { src = await compressImage(src, 1400); } catch (e) {}
+                    execPatchPeca(i, { [campo]: src });
+                };
+                reader.readAsDataURL(file);
+            };
+            // OS em preparação já está 'sent' -> o PUT é bloqueado; o registro das trocas
+            // (serial/foto) só entra pelo endpoint registrar-pecas, por isso o botão explícito.
+            const execSalvarPecas = async () => {
+                setExecPecasSalvando(true);
+                try {
+                    const r = await fetch(`/api/os/${execOs.id}/registrar-pecas`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': auth.token },
+                        body: JSON.stringify({ parts: execOs.parts })
+                    });
+                    const d = await r.json();
+                    if (d.success) { alert('Registro das peças salvo!'); fetchOsDrafts(); }
+                    else alert('Erro: ' + (d.error || 'falha ao salvar'));
+                } catch (e) { alert('Erro de rede: ' + (e.message || e)); }
+                finally { setExecPecasSalvando(false); }
+            };
+
+            const renderServicosExecutar = () => {
+                const lista = (osDrafts || []).filter(o => o.crmFaseCodigo === FASE_PREPARACAO);
+                return html`
+                    <div className="space-y-4">
+                        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                            <h2 className="text-xl font-semibold text-slate-800 flex items-center gap-2">
+                                <i className="ph-fill ph-wrench text-orange-500 text-2xl"></i> Serviços a executar
+                                <span className="text-sm font-normal text-slate-400">(${lista.length} em preparação)</span>
+                            </h2>
+                            <p className="text-sm text-slate-500 mt-1">Equipamentos liberados para manutenção. Marque cada serviço/peça conforme executar.</p>
+                        </div>
+
+                        ${!lista.length ? html`
+                            <div className="bg-white p-10 rounded-xl shadow-sm border border-slate-200 text-center text-slate-400">
+                                <i className="ph ph-check-circle text-5xl mb-2"></i>
+                                <p>Nenhum equipamento em preparação no momento.</p>
+                            </div>
+                        ` : lista.map(o => {
+                            const prog = execProgresso(o);
+                            const aberta = execAbertaId === o.id;
+                            const os = aberta && execOs ? execOs : o;
+                            const completo = prog.total > 0 && prog.feitos === prog.total;
+                            return html`
+                                <div key=${o.id} className="bg-white rounded-xl shadow-sm border ${completo ? 'border-emerald-300' : 'border-slate-200'} overflow-hidden">
+                                    <button onClick=${() => abrirExec(o)} className="w-full p-4 flex items-center justify-between gap-3 hover:bg-slate-50 text-left">
+                                        <div className="min-w-0">
+                                            <div className="font-semibold text-slate-800 truncate">${(o.client && o.client.name) || 'Sem cliente'}</div>
+                                            <div className="text-xs text-slate-500 truncate">
+                                                ${o.crmOpNum ? html`<span className="font-mono">${o.crmOpNum}</span> · ` : ''}
+                                                ${(o.fromLaudo && o.fromLaudo.model) || 'Equipamento'}
+                                                ${o.omieOsNumber ? html` · OS ${o.omieOsNumber}` : ''}
+                                            </div>
+                                        </div>
+                                        <div className="flex items-center gap-3 flex-shrink-0">
+                                            <span className=${`text-xs font-bold px-2 py-1 rounded-full ${completo ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
+                                                ${prog.feitos}/${prog.total}
+                                            </span>
+                                            <i className=${`ph-bold ${aberta ? 'ph-caret-up' : 'ph-caret-down'} text-slate-400`}></i>
+                                        </div>
+                                    </button>
+
+                                    ${aberta && html`
+                                        <div className="border-t border-slate-200 p-4 space-y-5">
+                                            ${execCarregando && html`<div className="text-xs text-slate-400 flex items-center gap-1"><i className="ph ph-spinner animate-spin"></i> carregando fotos…</div>`}
+
+                                            <div>
+                                                <h3 className="text-sm font-bold text-slate-700 mb-2 flex items-center gap-1"><i className="ph-fill ph-wrench text-blue-600"></i> Serviços</h3>
+                                                ${!(os.services || []).length ? html`<p className="text-xs text-slate-400">Nenhum serviço nesta OS.</p>` : html`
+                                                    <div className="space-y-1">
+                                                        ${(os.services || []).map((s, i) => {
+                                                            const feito = !!(os.checklistServicos || [])[i];
+                                                            return html`
+                                                                <label key=${i} className="flex items-start gap-2 p-2 rounded-lg bg-white border border-slate-200 cursor-pointer hover:border-blue-300">
+                                                                    <input type="checkbox" checked=${feito} onChange=${() => execToggle('servico', i)} className="mt-0.5 h-4 w-4 accent-emerald-600 flex-shrink-0" />
+                                                                    <span className=${`text-sm ${feito ? 'line-through text-slate-400' : 'text-slate-700'}`}>
+                                                                        ${s.description || s.code || 'serviço'}${s.quantity > 1 ? ` (${s.quantity}x)` : ''}
+                                                                    </span>
+                                                                </label>`;
+                                                        })}
+                                                    </div>
+                                                `}
+                                            </div>
+
+                                            <div>
+                                                <h3 className="text-sm font-bold text-slate-700 mb-2 flex items-center gap-1"><i className="ph-fill ph-package text-amber-600"></i> Peças</h3>
+                                                ${!(os.parts || []).length ? html`<p className="text-xs text-slate-400">Nenhuma peça nesta OS.</p>` : html`
+                                                    <div className="space-y-2">
+                                                        ${(os.parts || []).map((p, i) => {
+                                                            const feito = !!(os.checklistPecas || [])[i];
+                                                            return html`
+                                                                <div key=${i} className="p-3 rounded-lg bg-white border border-slate-200">
+                                                                    <label className="flex items-start gap-2 cursor-pointer">
+                                                                        <input type="checkbox" checked=${feito} onChange=${() => execToggle('peca', i)} className="mt-0.5 h-4 w-4 accent-emerald-600 flex-shrink-0" />
+                                                                        <span className=${`text-sm ${feito ? 'line-through text-slate-400' : 'text-slate-700'}`}>
+                                                                            ${p.description || p.code || 'peça'}${p.quantity > 1 ? ` (${p.quantity}x)` : ''}
+                                                                        </span>
+                                                                    </label>
+                                                                    ${controlesSubstituicao(p, i, execPatchPeca, execFotoPeca)}
+                                                                </div>`;
+                                                        })}
+                                                    </div>
+                                                `}
+                                            </div>
+
+                                            ${(os.parts || []).length ? html`
+                                                <div className="flex justify-end pt-1">
+                                                    <button onClick=${execSalvarPecas} disabled=${execPecasSalvando} className="bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white px-4 py-2 rounded-lg font-bold text-sm flex items-center gap-2">
+                                                        <i className="ph-bold ph-floppy-disk"></i> ${execPecasSalvando ? 'Salvando…' : 'Salvar registro das peças'}
+                                                    </button>
+                                                </div>
+                                                <p className="text-xs text-slate-400 text-right -mt-3">As caixinhas salvam sozinhas. O nº de série e as fotos precisam deste botão.</p>
+                                            ` : ''}
+                                        </div>
+                                    `}
+                                </div>`;
+                        })}
+                    </div>`;
+            };
+
             const renderOS = () => {
                 // Tela de edição de uma OS específica
                 if (currentOs) {
@@ -8225,36 +8441,7 @@ HTML_PAGE = """
                     };
                     // Controles de substituição (nº de série velho/novo + foto) — reaproveitados
                     // na seção Peças E no painel de Execução & Teste (preenchidos no momento da troca).
-                    const substituicaoControles = (p, i) => html`
-                        <div className="mt-3 pt-3 border-t border-dashed border-slate-300">
-                            <label className="flex items-center gap-2 cursor-pointer text-sm font-medium text-slate-700">
-                                <input type="checkbox" checked=${p.substituida || false} onChange=${e => updatePart(i, { substituida: e.target.checked })} className="w-4 h-4 text-amber-600" />
-                                <i className="ph-bold ph-arrows-left-right text-amber-600"></i> Peça substituída — registrar troca (nº de série)
-                            </label>
-                            ${p.substituida && html`
-                                <div className="mt-3">
-                                    <div className="flex items-center gap-4 text-sm text-slate-600 mb-2">
-                                        <span className="font-medium">Esta peça tem número de série?</span>
-                                        <label className="flex items-center gap-1 cursor-pointer"><input type="radio" checked=${p.temSerie === true} onChange=${() => updatePart(i, { temSerie: true })} className="accent-emerald-600" /> Sim</label>
-                                        <label className="flex items-center gap-1 cursor-pointer"><input type="radio" checked=${p.temSerie === false} onChange=${() => updatePart(i, { temSerie: false })} className="accent-emerald-600" /> Não</label>
-                                    </div>
-                                    ${p.temSerie === true ? html`
-                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                        <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-                                            <div className="text-xs font-bold text-red-700 uppercase mb-1"><i className="ph-fill ph-wrench"></i> Peça retirada (velha)</div>
-                                            <input type="text" placeholder="Nº de série da peça velha" value=${p.serialAntigo || ''} onChange=${e => updatePart(i, { serialAntigo: e.target.value })} className="w-full p-1.5 border border-slate-300 rounded text-sm mb-2 font-mono" />
-                                            ${p.fotoSerialAntigo ? html`<div className="relative"><img src=${p.fotoSerialAntigo} className="w-full h-28 object-contain border rounded bg-white" /><button onClick=${() => updatePart(i, { fotoSerialAntigo: null })} className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-6 h-6 text-xs"><i className="ph ph-x"></i></button></div>` : html`<label className="flex items-center justify-center gap-1 text-xs bg-white border border-dashed border-red-300 rounded p-3 cursor-pointer text-red-600 hover:bg-red-50"><i className="ph-bold ph-camera"></i> Foto do nº de série<input type="file" accept="image/*" capture="environment" className="hidden" onChange=${e => setPartPhoto(i, 'fotoSerialAntigo', e.target.files[0])} /></label>`}
-                                        </div>
-                                        <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3">
-                                            <div className="text-xs font-bold text-emerald-700 uppercase mb-1"><i className="ph-fill ph-seal-check"></i> Peça nova (instalada)</div>
-                                            <input type="text" placeholder="Nº de série da peça nova" value=${p.serialNovo || ''} onChange=${e => updatePart(i, { serialNovo: e.target.value })} className="w-full p-1.5 border border-slate-300 rounded text-sm mb-2 font-mono" />
-                                            ${p.fotoSerialNovo ? html`<div className="relative"><img src=${p.fotoSerialNovo} className="w-full h-28 object-contain border rounded bg-white" /><button onClick=${() => updatePart(i, { fotoSerialNovo: null })} className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-6 h-6 text-xs"><i className="ph ph-x"></i></button></div>` : html`<label className="flex items-center justify-center gap-1 text-xs bg-white border border-dashed border-emerald-300 rounded p-3 cursor-pointer text-emerald-600 hover:bg-emerald-50"><i className="ph-bold ph-camera"></i> Foto do nº de série<input type="file" accept="image/*" capture="environment" className="hidden" onChange=${e => setPartPhoto(i, 'fotoSerialNovo', e.target.files[0])} /></label>`}
-                                        </div>
-                                    </div>
-                                    ` : (p.temSerie === false ? html`<div className="text-xs text-slate-500 italic bg-slate-50 border border-slate-200 rounded p-2">Peça sem número de série — troca registrada sem serial.</div>` : html`<div className="text-xs text-amber-600"><i className="ph-bold ph-arrow-up"></i> Selecione se a peça tem número de série.</div>`)}
-                                </div>
-                            `}
-                        </div>`;
+                    const substituicaoControles = (p, i) => controlesSubstituicao(p, i, updatePart, setPartPhoto);
                     const addService = () => updateOs({ services: [...(currentOs.services || []), { omieServiceId: null, code: '', description: '', quantity: 1, unitPrice: 0 }] });
                     const removeService = (i) => updateOs({ services: currentOs.services.filter((_, idx) => idx !== i) });
                     const addPart = () => updateOs({ parts: [...(currentOs.parts || []), { omieProductId: null, code: '', description: '', quantity: 1, unitPrice: 0 }] });
@@ -8973,6 +9160,10 @@ HTML_PAGE = """
 
                         <div className="flex space-x-1 mb-6 bg-slate-200 p-1 rounded-xl w-full md:w-fit overflow-x-auto scrollbar-hide">
                             <button onClick=${() => setActiveTab('report')} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'report' ? 'bg-white text-blue-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}><i className="ph-bold ph-file-text"></i> Preencher Laudo</button>
+                            <button onClick=${() => setActiveTab('executar')} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'executar' ? 'bg-white text-orange-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}>
+                                <i className="ph-bold ph-wrench"></i> Serviços a executar
+                                ${(() => { const n = (osDrafts || []).filter(o => o.crmFaseCodigo === FASE_PREPARACAO).length; return n ? html`<span className="bg-orange-500 text-white text-xs font-bold px-1.5 py-0.5 rounded-full">${n}</span>` : ''; })()}
+                            </button>
                             <button onClick=${() => { setActiveTab('os'); setCurrentOs(null); }} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'os' ? 'bg-white text-indigo-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}><i className="ph-bold ph-clipboard-text"></i> Ordens de Serviço</button>
                             <button onClick=${() => setActiveTab('crm')} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'crm' ? 'bg-white text-amber-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}><i className="ph-bold ph-funnel"></i> Oportunidades (CRM)</button>
 
@@ -8985,6 +9176,7 @@ HTML_PAGE = """
 
                         <main>
                             ${activeTab === 'report' ? renderReportForm() : ''}
+                            ${activeTab === 'executar' ? renderServicosExecutar() : ''}
                             ${activeTab === 'os' ? renderOS() : ''}
                             ${activeTab === 'crm' ? renderCRM() : ''}
                             ${activeTab === 'relatorios' && auth.role === 'admin' ? renderRelatorios() : ''}
