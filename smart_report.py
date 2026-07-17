@@ -704,6 +704,11 @@ def update_data():
         # disparar ANTES das imagens carregarem (via /api/diagrams), o payload viria com
         # diagramas SEM imageBase64 → apagaria as imagens. Aqui, todo diagrama que chega
         # sem imageBase64 recupera o base64 já salvo (casado por id de modelo+diagrama).
+        # 2º caso (desde a compressão do /api/diagrams): o frontend recebe o diagrama já
+        # convertido pra WebP; num autosave ele DEVOLVE esse WebP. Se salvássemos, o PNG
+        # original seria trocado pela versão comprimida (com perda), silenciosamente. Então,
+        # quando o que chega é exatamente o que _diagrama_leve() gera a partir do salvo,
+        # mantemos o ORIGINAL. Imagem nova de verdade é diferente disso → é salva normal.
         old_models = {m.get('id'): m for m in (full_data.get('globalConfig', {}).get('models') or [])}
         for m in (new_gc.get('models') or []):
             old_m = old_models.get(m.get('id'))
@@ -711,10 +716,13 @@ def update_data():
                 continue
             old_diags = {d.get('id'): d for d in (old_m.get('diagrams') or [])}
             for d in (m.get('diagrams') or []):
+                prev = old_diags.get(d.get('id'))
+                if not prev or not prev.get('imageBase64'):
+                    continue
                 if not d.get('imageBase64'):
-                    prev = old_diags.get(d.get('id'))
-                    if prev and prev.get('imageBase64'):
-                        d['imageBase64'] = prev['imageBase64']
+                    d['imageBase64'] = prev['imageBase64']
+                elif d.get('imageBase64') == _diagrama_leve(prev['imageBase64']):
+                    d['imageBase64'] = prev['imageBase64']
         # PRESERVA flags que um frontend em cache pode não reenviar (não apagar a flag).
         if 'faturarPeloRobo' not in new_gc:
             prev_flag = (full_data.get('globalConfig') or {}).get('faturarPeloRobo')
@@ -726,10 +734,50 @@ def update_data():
     return jsonify({"status": "success"})
 
 
+_DIAG_LEVE_CACHE = {}   # md5(base64 original) -> base64 já convertido (WebP)
+
+
+def _diagrama_leve(b64):
+    """Converte o base64 do diagrama pra WebP na MESMA resolução (alpha preservado).
+
+    Os diagramas eram PNG 1024x1024 de ~0,5 MB cada; em WebP caem pra ~20 KB (-95%).
+    Como T30/T40/T50 compartilham as mesmas imagens, o /api/diagrams chegava a 8,8 MB
+    e o celular ficava sem memória (tela branca). NÃO altera os dados salvos — converte
+    só no transporte. WebP é lido por todos os navegadores atuais e pelo ReportLab (PDF).
+
+    À prova de falha: imagem pequena, formato desconhecido, erro ou resultado maior que
+    o original => devolve o base64 ORIGINAL intacto. Cache em memória por hash do conteúdo
+    (o mesmo diagrama repetido nos 3 modelos converte uma vez só)."""
+    if not isinstance(b64, str) or 'base64,' not in b64:
+        return b64
+    chave = hashlib.md5(b64.encode('utf-8', 'ignore')).hexdigest()
+    if chave in _DIAG_LEVE_CACHE:
+        return _DIAG_LEVE_CACHE[chave]
+    novo = b64
+    try:
+        raw = base64.b64decode(b64.split('base64,', 1)[1])
+        if len(raw) >= 40 * 1024:          # abaixo disso não compensa converter
+            from PIL import Image
+            img = Image.open(io.BytesIO(raw))
+            img.load()
+            tem_alpha = img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info)
+            img = img.convert('RGBA' if tem_alpha else 'RGB')
+            buf = io.BytesIO()
+            img.save(buf, 'WEBP', quality=82, method=6)
+            cand = 'data:image/webp;base64,' + base64.b64encode(buf.getvalue()).decode('ascii')
+            if len(cand) < len(b64):
+                novo = cand
+    except Exception:
+        novo = b64                          # qualquer problema: serve o original
+    _DIAG_LEVE_CACHE[chave] = novo
+    return novo
+
+
 @app.route('/api/diagrams', methods=['GET'])
 def get_diagrams():
     """Imagens base64 dos diagramas, por modelo. Carregado APÓS o /api/data (não bloqueia
-    a carga inicial). Retorna { modelId: [{id, imageBase64}, ...] }."""
+    a carga inicial). Retorna { modelId: [{id, imageBase64}, ...] }.
+    As imagens vão comprimidas (WebP) — ver _diagrama_leve."""
     full_data = load_data()
     user = _resolve_token(full_data, request.headers.get('Authorization'))
     if not user:
@@ -737,7 +785,7 @@ def get_diagrams():
     out = {}
     for m in (full_data.get('globalConfig', {}).get('models') or []):
         out[m.get('id')] = [
-            {"id": d.get('id'), "imageBase64": d.get('imageBase64')}
+            {"id": d.get('id'), "imageBase64": _diagrama_leve(d.get('imageBase64'))}
             for d in (m.get('diagrams') or [])
         ]
     return jsonify(out)
