@@ -2870,6 +2870,22 @@ def _strip_part_photos(draft):
     return {**draft, 'parts': novas} if pesado else draft
 
 
+def _resumo_laudo(full_data, owner, draft):
+    """Parecer técnico da IA (o que fazer no equipamento) pra mostrar na bancada.
+    Preferência: o texto capturado na própria OS (fromLaudo.laudoTecnico, nas OS novas);
+    senão, busca no laudo vinculado (laudoId) no histórico de quem criou a OS."""
+    fl = (draft.get('fromLaudo') or {})
+    txt = (fl.get('laudoTecnico') or '').strip()
+    if txt:
+        return txt
+    lid = draft.get('laudoId')
+    if lid and owner:
+        laudo = ((full_data.get('laudos') or {}).get(owner) or {}).get(lid) or {}
+        hd = ((laudo.get('state') or {}).get('headerData') or {})
+        return (hd.get('laudoTecnico') or '').strip()
+    return ''
+
+
 @app.route('/api/os/bancada', methods=['GET'])
 def os_bancada():
     """Bancada 'Serviços a executar', guiada pela verdade do OMIE (não pelo cache).
@@ -2904,13 +2920,13 @@ def os_bancada():
         c_des = ident.get('cDesOp') or ''
         c_obs = (op.get('observacoes') or {}).get('cObs') or ''
         _serial, equipamento, _def = _crm_parse_equipamento(c_des, c_obs)
-        candidatos = [d for _o, d in por_num.get(num, [])]
+        candidatos = por_num.get(num, [])  # [(owner, draft)]
         # escolhe a OS ATIVA mais recente; se nenhuma ativa, a mais recente (só p/ referência)
-        ativos = [d for d in candidatos if _ativa(d)]
-        escolha = None
+        ativos = [(o, d) for o, d in candidatos if _ativa(d)]
+        escolha_owner, escolha = None, None
         if ativos:
-            escolha = max(ativos, key=lambda d: d.get('createdAt') or '')
-        elif candidatos and any((d.get('execEstado') or 'a_executar') in ('aguardando_teste', 'aprovado') for d in candidatos):
+            escolha_owner, escolha = max(ativos, key=lambda od: od[1].get('createdAt') or '')
+        elif candidatos and any((d.get('execEstado') or 'a_executar') in ('aguardando_teste', 'aprovado') for _o, d in candidatos):
             # já foi pro teste/liberação -> some da bancada
             continue
         entry = {
@@ -2925,9 +2941,12 @@ def os_bancada():
                 tocou = True
             entry["osId"] = escolha.get('id')
             entry["os"] = _strip_part_photos(escolha)
+            # Resumo do que fazer = parecer da IA (laudoTecnico), pro técnico ver na bancada.
+            entry["resumo"] = _resumo_laudo(full_data, escolha_owner, escolha)
         else:
             entry["osId"] = None
             entry["os"] = None
+            entry["resumo"] = ''
         saida.append(entry)
     if tocou:
         save_data(full_data)
@@ -5868,7 +5887,7 @@ HTML_PAGE = """
                     ? { omieClientId: headerData.crmClienteOmieId, name: clientName, document: '', email: '', phone: '' }
                     : { omieClientId: null, name: clientName, document: '', email: '', phone: '' };
                 createNewOs({
-                    fromLaudo: { client: clientName, model: modelName, defect, generatedAt: new Date().toISOString() },
+                    fromLaudo: { client: clientName, model: modelName, defect, laudoTecnico: headerData.laudoTecnico || '', generatedAt: new Date().toISOString() },
                     client: clientPrefill,
                     observations: obs,
                     laudoId: laudoId || null,
@@ -8850,6 +8869,13 @@ HTML_PAGE = """
                                     ${aberta && html`
                                         <div className="border-t border-slate-200 p-4 space-y-5">
                                             ${execCarregando && html`<div className="text-xs text-slate-400 flex items-center gap-1"><i className="ph ph-spinner animate-spin"></i> carregando fotos…</div>`}
+
+                                            ${e.resumo ? html`
+                                                <div className="bg-purple-50 border border-purple-200 rounded-lg p-3">
+                                                    <div className="text-xs font-bold text-purple-700 uppercase mb-1 flex items-center gap-1"><i className="ph-fill ph-sparkle"></i> Resumo do que fazer (laudo IA)</div>
+                                                    <p className="text-sm text-slate-700 whitespace-pre-wrap leading-relaxed">${e.resumo}</p>
+                                                </div>
+                                            ` : ''}
 
                                             ${os.execEstado === 'reprovado' && os.execMotivoReprova ? html`
                                                 <div className="bg-red-50 border border-red-300 rounded-lg p-3">
