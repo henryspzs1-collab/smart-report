@@ -2870,6 +2870,70 @@ def _strip_part_photos(draft):
     return {**draft, 'parts': novas} if pesado else draft
 
 
+@app.route('/api/os/bancada', methods=['GET'])
+def os_bancada():
+    """Bancada 'Serviços a executar', guiada pela verdade do OMIE (não pelo cache).
+
+    Puxa as oportunidades que ESTÃO em '03 Em Preparação' no Omie AGORA e, para cada uma,
+    liga a MELHOR OS do app (a mais recente que ainda está na bancada). Uma linha por
+    oportunidade — sem duplicatas (havia op com 11 OS de sobra dos testes) e sem OS velhas
+    cuja oportunidade já saiu de Preparação. Deixa a fase cacheada da OS escolhida correta
+    (Preparação), pra o 'Aprovar e liberar' mandar pra fase de destino certa depois."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    try:
+        ops = _omie_oportunidades_da_fase(CRM_FASE_PREPARACAO)
+    except OmieError as e:
+        return jsonify({"error": f"Falha ao consultar o Omie: {e}"}), 502
+
+    por_num = {}
+    for owner, d in _all_filial_drafts(full_data, user):
+        n = str(d.get('crmOpNum') or '')
+        if n:
+            por_num.setdefault(n, []).append((owner, d))
+
+    def _ativa(d):   # ainda pertence à bancada? (não foi pro teste/histórico)
+        return (d.get('execEstado') or 'a_executar') in ('a_executar', 'reprovado')
+
+    saida = []
+    tocou = False
+    for op in ops:
+        ident = op.get('identificacao', {}) or {}
+        num = str(ident.get('cNumOp') or '')
+        c_des = ident.get('cDesOp') or ''
+        c_obs = (op.get('observacoes') or {}).get('cObs') or ''
+        _serial, equipamento, _def = _crm_parse_equipamento(c_des, c_obs)
+        candidatos = [d for _o, d in por_num.get(num, [])]
+        # escolhe a OS ATIVA mais recente; se nenhuma ativa, a mais recente (só p/ referência)
+        ativos = [d for d in candidatos if _ativa(d)]
+        escolha = None
+        if ativos:
+            escolha = max(ativos, key=lambda d: d.get('createdAt') or '')
+        elif candidatos and any((d.get('execEstado') or 'a_executar') in ('aguardando_teste', 'aprovado') for d in candidatos):
+            # já foi pro teste/liberação -> some da bancada
+            continue
+        entry = {
+            "crmOpNum": num,
+            "cliente": c_des.split(' - ')[0] if ' - ' in c_des else (c_des or 'Sem cliente'),
+            "equipamento": equipamento or '',
+            "descricao": c_des,
+        }
+        if escolha is not None:
+            if escolha.get('crmFaseCodigo') != CRM_FASE_PREPARACAO:
+                escolha['crmFaseCodigo'] = CRM_FASE_PREPARACAO
+                tocou = True
+            entry["osId"] = escolha.get('id')
+            entry["os"] = _strip_part_photos(escolha)
+        else:
+            entry["osId"] = None
+            entry["os"] = None
+        saida.append(entry)
+    if tocou:
+        save_data(full_data)
+    return jsonify({"items": saida, "total": len(saida)})
+
+
 @app.route('/api/os', methods=['GET'])
 def os_list():
     user, full_data, err = _require_user()
@@ -5225,7 +5289,8 @@ HTML_PAGE = """
             const [execOs, setExecOs] = useState(null);
             const [execCarregando, setExecCarregando] = useState(false);
             const [execPecasSalvando, setExecPecasSalvando] = useState(false);
-            const [fasesSincronizando, setFasesSincronizando] = useState(false);
+            const [bancadaOps, setBancadaOps] = useState([]);      // bancada guiada pelo Omie
+            const [bancadaLoading, setBancadaLoading] = useState(false);
             // Aba "Teste e Liberação" (execEstado === 'aguardando_teste')
             const [testeAbertaId, setTesteAbertaId] = useState(null);
             const [testeMotivo, setTesteMotivo] = useState('');
@@ -5422,21 +5487,18 @@ HTML_PAGE = """
                 fetch('/api/os', { headers: { 'Authorization': auth.token } })
                     .then(r => r.json()).then(d => { if(Array.isArray(d)) setOsDrafts(d); });
             };
-            // Sincroniza a fase cacheada das OS com o Omie e recarrega. A equipe move as
-            // oportunidades no funil do Omie; sem isso, a aba "Serviços a executar" (filtra
-            // por fase) escondia oportunidades que já estavam em Preparação.
-            const sincronizarFases = async (silencioso = true) => {
-                setFasesSincronizando(true);
+            // Bancada "Serviços a executar": puxa do OMIE as oportunidades em Preparação
+            // (uma por op, sem duplicata) já ligadas à OS do app. Fonte da verdade é o Omie,
+            // não a fase cacheada — assim nada fica velho nem duplicado.
+            const fetchBancada = async () => {
+                setBancadaLoading(true);
                 try {
-                    const r = await fetch('/api/crm/sync-fases', {
-                        method: 'POST', headers: { 'Authorization': auth.token }
-                    });
+                    const r = await fetch('/api/os/bancada', { headers: { 'Authorization': auth.token } });
                     const d = await r.json();
-                    await new Promise(res => { fetch('/api/os', { headers: { 'Authorization': auth.token } })
-                        .then(x => x.json()).then(list => { if (Array.isArray(list)) setOsDrafts(list); res(); }).catch(res); });
-                    if (!silencioso) alert(d && d.success ? `Sincronizado com o Omie. ${d.atualizadas || 0} OS atualizada(s).` : ('Erro: ' + ((d && d.error) || 'falha')));
-                } catch (e) { if (!silencioso) alert('Erro de rede: ' + (e.message || e)); }
-                finally { setFasesSincronizando(false); }
+                    if (d && Array.isArray(d.items)) setBancadaOps(d.items);
+                    else if (d && d.error) console.warn('bancada:', d.error);
+                } catch (e) {}
+                setBancadaLoading(false);
             };
             // Abre uma OS da lista: mostra na hora (lista é enxuta, sem fotos de peça)
             // e em seguida troca pela versão COMPLETA (com fotos) vinda do GET /api/os/<id>.
@@ -5471,10 +5533,9 @@ HTML_PAGE = """
                 if (auth && ['os', 'executar', 'teste', 'historico'].includes(activeTab)) {
                     fetchOsDrafts();
                 }
-                // Ao abrir a bancada, sincroniza as fases com o Omie (traz as que foram
-                // movidas pra Preparação por fora do app). Roda em silêncio no fundo.
+                // A bancada é guiada pelo Omie (não pela lista local) -> busca própria.
                 if (auth && activeTab === 'executar') {
-                    sincronizarFases(true);
+                    fetchBancada();
                 }
                 if (auth && activeTab === 'os') {
                     if (!omieStatus.checked) checkOmieStatus();
@@ -8632,9 +8693,6 @@ HTML_PAGE = """
             // backend. A lista vem sem as fotos das peças; ao abrir a OS buscamos a completa.
             // Quem está na bancada: em preparação e ainda não foi pro teste (ou voltou reprovado).
             // Fonte única — a lista e o badge da aba usam ESTA função (já tinham divergido).
-            const naBancada = (o) => o.crmFaseCodigo === FASE_PREPARACAO
-                && ['a_executar', 'reprovado'].includes(o.execEstado || 'a_executar');
-
             const execProgresso = (o) => {
                 const s = (o.services || []).length, p = (o.parts || []).length;
                 const fs = (o.checklistServicos || []).filter(Boolean).length;
@@ -8661,7 +8719,7 @@ HTML_PAGE = """
                 const arr = base.map((_, i) => !!(execOs[key] || [])[i]);
                 arr[idx] = !arr[idx];
                 setExecOs(prev => ({ ...prev, [key]: arr }));
-                setOsDrafts(prev => prev.map(o => o.id === execOs.id ? { ...o, [key]: arr } : o));
+                setBancadaOps(prev => prev.map(e => e.osId === execOs.id ? { ...e, os: { ...e.os, [key]: arr } } : e));
                 try {
                     await fetch(`/api/os/${execOs.id}/exec-checklist`, {
                         method: 'POST',
@@ -8695,7 +8753,7 @@ HTML_PAGE = """
                         body: JSON.stringify({ parts: execOs.parts })
                     });
                     const d = await r.json();
-                    if (d.success) { alert('Registro das peças salvo!'); fetchOsDrafts(); }
+                    if (d.success) { alert('Registro das peças salvo!'); }
                     else alert('Erro: ' + (d.error || 'falha ao salvar'));
                 } catch (e) { alert('Erro de rede: ' + (e.message || e)); }
                 finally { setExecPecasSalvando(false); }
@@ -8713,6 +8771,7 @@ HTML_PAGE = """
                     const d = await r.json();
                     if (d && d.id) {
                         setExecAbertaId(null); setExecOs(null);
+                        setBancadaOps(prev => prev.filter(e => e.osId !== o.id));  // sai da bancada
                         fetchOsDrafts();
                         setActiveTab('teste');
                     } else alert('Erro: ' + (d.error || 'falha ao finalizar'));
@@ -8720,7 +8779,6 @@ HTML_PAGE = """
             };
 
             const renderServicosExecutar = () => {
-                const lista = (osDrafts || []).filter(naBancada);
                 return html`
                     <div className="space-y-4">
                         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
@@ -8728,22 +8786,36 @@ HTML_PAGE = """
                                 <div>
                                     <h2 className="text-xl font-semibold text-slate-800 flex items-center gap-2">
                                         <i className="ph-fill ph-wrench text-orange-500 text-2xl"></i> Serviços a executar
-                                        <span className="text-sm font-normal text-slate-400">(${lista.length} em preparação)</span>
+                                        <span className="text-sm font-normal text-slate-400">(${bancadaOps.length} em preparação)</span>
                                     </h2>
-                                    <p className="text-sm text-slate-500 mt-1">Equipamentos liberados para manutenção. Marque cada serviço/peça conforme executar.</p>
+                                    <p className="text-sm text-slate-500 mt-1">Oportunidades em "03 Em Preparação" no Omie. Marque cada serviço/peça conforme executar.</p>
                                 </div>
-                                <button onClick=${() => sincronizarFases(false)} disabled=${fasesSincronizando} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-1 disabled:opacity-50">
-                                    <i className=${`ph-bold ph-arrows-clockwise ${fasesSincronizando ? 'animate-spin' : ''}`}></i> ${fasesSincronizando ? 'Sincronizando…' : 'Sincronizar com o Omie'}
+                                <button onClick=${fetchBancada} disabled=${bancadaLoading} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-1 disabled:opacity-50">
+                                    <i className=${`ph-bold ph-arrows-clockwise ${bancadaLoading ? 'animate-spin' : ''}`}></i> ${bancadaLoading ? 'Atualizando…' : 'Atualizar do Omie'}
                                 </button>
                             </div>
                         </div>
 
-                        ${!lista.length ? html`
+                        ${bancadaLoading && !bancadaOps.length ? html`
+                            <div className="bg-white p-10 rounded-xl shadow-sm border border-slate-200 text-center text-slate-400">
+                                <i className="ph ph-spinner animate-spin text-4xl mb-2"></i>
+                                <p>Buscando as oportunidades em preparação no Omie…</p>
+                            </div>
+                        ` : !bancadaOps.length ? html`
                             <div className="bg-white p-10 rounded-xl shadow-sm border border-slate-200 text-center text-slate-400">
                                 <i className="ph ph-check-circle text-5xl mb-2"></i>
                                 <p>Nenhum equipamento em preparação no momento.</p>
                             </div>
-                        ` : lista.map(o => {
+                        ` : bancadaOps.map(e => {
+                            const o = e.os;
+                            if (!o) {
+                                return html`
+                                    <div key=${e.crmOpNum} className="bg-white rounded-xl shadow-sm border border-dashed border-amber-300 p-4">
+                                        <div className="font-semibold text-slate-800">${e.cliente || 'Sem cliente'}</div>
+                                        <div className="text-xs text-slate-500"><span className="font-mono">${e.crmOpNum}</span> · ${e.equipamento || 'Equipamento'}</div>
+                                        <p className="text-xs text-amber-600 mt-2"><i className="ph-bold ph-warning"></i> Esta oportunidade ainda não tem OS no app — abra-a na aba CRM e gere a OS para executar aqui.</p>
+                                    </div>`;
+                            }
                             const prog = execProgresso(o);
                             const aberta = execAbertaId === o.id;
                             const os = aberta && execOs ? execOs : o;
@@ -8753,10 +8825,10 @@ HTML_PAGE = """
                                 <div key=${o.id} className="bg-white rounded-xl shadow-sm border ${reprovado ? 'border-red-300' : (completo ? 'border-emerald-300' : 'border-slate-200')} overflow-hidden">
                                     <button onClick=${() => abrirExec(o)} className="w-full p-4 flex items-center justify-between gap-3 hover:bg-slate-50 text-left">
                                         <div className="min-w-0">
-                                            <div className="font-semibold text-slate-800 truncate">${(o.client && o.client.name) || 'Sem cliente'}</div>
+                                            <div className="font-semibold text-slate-800 truncate">${e.cliente || (o.client && o.client.name) || 'Sem cliente'}</div>
                                             <div className="text-xs text-slate-500 truncate">
-                                                ${o.crmOpNum ? html`<span className="font-mono">${o.crmOpNum}</span> · ` : ''}
-                                                ${(o.fromLaudo && o.fromLaudo.model) || 'Equipamento'}
+                                                ${e.crmOpNum ? html`<span className="font-mono">${e.crmOpNum}</span> · ` : ''}
+                                                ${e.equipamento || (o.fromLaudo && o.fromLaudo.model) || 'Equipamento'}
                                                 ${o.omieOsNumber ? html` · OS ${o.omieOsNumber}` : ''}
                                             </div>
                                             ${reprovado && o.execMotivoReprova ? html`
@@ -9620,7 +9692,7 @@ HTML_PAGE = """
                             <button onClick=${() => setActiveTab('report')} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'report' ? 'bg-white text-blue-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}><i className="ph-bold ph-file-text"></i> Preencher Laudo</button>
                             <button onClick=${() => setActiveTab('executar')} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'executar' ? 'bg-white text-orange-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}>
                                 <i className="ph-bold ph-wrench"></i> Serviços a executar
-                                ${(() => { const n = (osDrafts || []).filter(naBancada).length; return n ? html`<span className="bg-orange-500 text-white text-xs font-bold px-1.5 py-0.5 rounded-full">${n}</span>` : ''; })()}
+                                ${bancadaOps.length ? html`<span className="bg-orange-500 text-white text-xs font-bold px-1.5 py-0.5 rounded-full">${bancadaOps.length}</span>` : ''}
                             </button>
                             <button onClick=${() => setActiveTab('teste')} className=${`whitespace-nowrap px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-all ${activeTab === 'teste' ? 'bg-white text-cyan-700 shadow' : 'text-slate-600 hover:bg-slate-300'}`}>
                                 <i className="ph-bold ph-test-tube"></i> Teste e Liberação
