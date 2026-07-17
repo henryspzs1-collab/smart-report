@@ -3792,13 +3792,16 @@ def _gerar_pdf_laudo(payload):
         item_status_ok = ParagraphStyle('item_ok', parent=body, fontSize=8.5, leading=11, leftIndent=14, textColor=C_MUTED, spaceAfter=7)
         item_status_anormal = ParagraphStyle('item_anormal', parent=body, fontSize=9, leading=12, leftIndent=14, textColor=C_DARK, spaceAfter=7)
 
+        # Só entram no PDF os itens CONSTATADOS/preenchidos — os "Não Constatado" são
+        # omitidos pra deixar o laudo enxuto e de leitura fácil (pedido do Henry).
+        marcados = 0
         for q in questions:
             ans = answers.get(q.get('id'), {}) or {}
             checked = ans.get('checked')
             qtype = q.get('type', 'checkbox')
             anormal = False
             if qtype == 'text':
-                status = ans.get('text') or '-'
+                status = ans.get('text') or ''
                 anormal = bool(ans.get('text'))
             elif checked:
                 anormal = True
@@ -3809,14 +3812,30 @@ def _gerar_pdf_laudo(payload):
                 else:
                     status = 'Constatado'
             else:
-                status = 'Não Constatado'
+                status = ''
+            if not anormal:
+                continue
+            marcados += 1
 
-            # Marcador colorido: vermelho pra anormal, verde pra ok
-            cor = '#dc2626' if anormal else '#16a34a'
-            marker = '&#8226;'  # bullet (WinAnsi-safe); cor indica anormal/ok
-            story.append(Paragraph(f'<font color="{cor}">{marker}</font> {_esc(q.get("label",""))}', item_label))
-            style = item_status_anormal if anormal else item_status_ok
-            story.append(Paragraph(_esc(status), style))
+            marker = '&#8226;'  # bullet (WinAnsi-safe)
+            story.append(Paragraph(f'<font color="#dc2626">{marker}</font> {_esc(q.get("label",""))}', item_label))
+            if status:
+                story.append(Paragraph(_esc(status), item_status_anormal))
+        if not marcados:
+            story.append(Paragraph('Nenhuma anormalidade constatada na inspeção.', item_status_ok))
+        story.append(Spacer(1, 5*mm))
+
+    # ---- Laudo Técnico (parecer, normalmente elaborado com apoio da IA) ----
+    # Texto livre e potencialmente longo -> renderizado como PARÁGRAFOS soltos (não em
+    # tabela): parágrafo quebra entre páginas sozinho, então nunca estoura o layout.
+    laudo_tecnico = (header_data.get('laudoTecnico') or '').strip()
+    if laudo_tecnico:
+        story.append(secao('Laudo Técnico'))
+        story.append(Spacer(1, 2*mm))
+        p_laudo = ParagraphStyle('laudo_tec', parent=body, fontSize=9.5, leading=13,
+                                 alignment=4, spaceAfter=5)  # 4 = justificado
+        for bloco in [b for b in laudo_tecnico.split('\n') if b.strip()]:
+            story.append(Paragraph(_esc(bloco), p_laudo))
         story.append(Spacer(1, 5*mm))
 
     # ---- Análise de Células ----
@@ -6591,8 +6610,12 @@ HTML_PAGE = """
                 }
             };
 
-            const copiarTextoIA = () => {
-                navigator.clipboard?.writeText(iaTexto).then(() => alert('Texto copiado!'));
+            // Grava o parecer da IA no laudo (campo headerData.laudoTecnico), que vira a
+            // seção "Laudo Técnico" do PDF. Antes o único caminho era copiar e colar à mão
+            // no "Defeito Alegado pelo Cliente" — campo errado, e era isso que estourava o PDF.
+            const usarLaudoIA = () => {
+                setHeaderData(prev => ({ ...prev, laudoTecnico: iaTexto }));
+                setIaModalOpen(false);
             };
 
             // ---- Download fotos como ZIP ----
@@ -7027,6 +7050,20 @@ HTML_PAGE = """
                                 </div>
                             </div>
                         `}
+
+                        ${headerData.laudoTecnico ? html`
+                            <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                                <h2 className="text-xl font-semibold mb-1 text-slate-800 flex items-center gap-2">
+                                    <i className="ph-fill ph-sparkle text-purple-600 text-2xl"></i> Laudo Técnico
+                                </h2>
+                                <p className="text-sm text-slate-500 mb-4">Parecer que sai no PDF, logo após os resultados da inspeção. Pode editar à vontade.</p>
+                                <textarea value=${headerData.laudoTecnico} onChange=${e => setHeaderData(prev => ({ ...prev, laudoTecnico: e.target.value }))} rows="10" className="w-full p-3 border border-slate-300 rounded-lg text-sm leading-relaxed outline-none focus:ring-2 focus:ring-purple-500"></textarea>
+                                <div className="flex gap-2 mt-3">
+                                    <button onClick=${gerarTextoIA} className="text-sm px-3 py-1.5 rounded-lg bg-purple-50 text-purple-700 hover:bg-purple-100 font-medium flex items-center gap-1"><i className="ph-bold ph-arrows-clockwise"></i> Gerar novamente com IA</button>
+                                    <button onClick=${() => setHeaderData(prev => ({ ...prev, laudoTecnico: '' }))} className="text-sm px-3 py-1.5 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200 font-medium">Remover do laudo</button>
+                                </div>
+                            </div>
+                        ` : ''}
 
                         ${selectedModel && selectedModel.cellAnalysis && selectedModel.cellAnalysis.enabled && html`
                             <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
@@ -8989,13 +9026,13 @@ HTML_PAGE = """
                                         </div>
                                     ` : html`
                                         <textarea value=${iaTexto} onChange=${e => setIaTexto(e.target.value)} rows="16" className="w-full p-3 border border-slate-300 rounded-lg text-sm leading-relaxed focus:ring-2 focus:ring-purple-500 outline-none" placeholder="O texto gerado aparecerá aqui..."></textarea>
-                                        <p className="text-xs text-slate-400 mt-2">Você pode editar o texto antes de copiar. A IA pode cometer erros — revise sempre.</p>
+                                        <p className="text-xs text-slate-400 mt-2">Você pode editar o texto antes de usar. A IA pode cometer erros — revise sempre.</p>
                                     `}
                                 </div>
                                 ${!iaLoading && html`
                                     <div className="p-4 border-t border-slate-200 flex gap-2 bg-slate-50 rounded-b-xl">
                                         <button onClick=${gerarTextoIA} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-lg font-medium text-sm flex items-center gap-2"><i className="ph-bold ph-arrows-clockwise"></i> Gerar Novamente</button>
-                                        <button onClick=${copiarTextoIA} className="flex-1 bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg font-bold text-sm flex items-center justify-center gap-2"><i className="ph-bold ph-copy"></i> Copiar Texto</button>
+                                        <button onClick=${usarLaudoIA} disabled=${!iaTexto || iaTexto.startsWith('❌')} className="flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-bold text-sm flex items-center justify-center gap-2"><i className="ph-bold ph-check"></i> Usar no laudo</button>
                                     </div>
                                 `}
                             </div>
