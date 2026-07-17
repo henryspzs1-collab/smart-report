@@ -1777,6 +1777,30 @@ def _crm_buscar_cliente_faturamento(doc):
     return None
 
 
+def _omie_oportunidades_da_fase(fase):
+    """Todos os cadastros de oportunidade de UMA fase — percorrendo TODAS as páginas.
+    Antes buscávamos só a página 1 (50 registros) e o resto era cortado calado: fases
+    com mais de 50 oportunidades apareciam truncadas (ex.: Aprovação parava em 50)."""
+    cadastros = []
+    pagina = 1
+    while True:
+        try:
+            data = omie_call('/crm/oportunidades/', 'ListarOportunidades', {
+                "pagina": pagina,
+                "registros_por_pagina": 100,
+                "fase": fase,
+            })
+        except OmieNoRecords:
+            break
+        lote = data.get('cadastros', []) or []
+        cadastros.extend(lote)
+        total_pag = int(data.get('total_de_paginas') or 1)
+        if pagina >= total_pag or not lote:
+            break
+        pagina += 1
+    return cadastros
+
+
 @app.route('/api/crm/oportunidades', methods=['GET'])
 def crm_listar_oportunidades():
     """Lista oportunidades nas fases '01 Em Análise', '02 Em Aprovação' e '03 Em Preparação'.
@@ -1791,17 +1815,11 @@ def crm_listar_oportunidades():
     erro = None
     for fase in fases:
         try:
-            data = omie_call('/crm/oportunidades/', 'ListarOportunidades', {
-                "pagina": 1,
-                "registros_por_pagina": 50,
-                "fase": fase
-            })
-        except OmieNoRecords:
-            continue
+            cadastros = _omie_oportunidades_da_fase(fase)
         except OmieError as e:
             erro = str(e)
             continue
-        for op in data.get('cadastros', []):
+        for op in cadastros:
             ident = op.get('identificacao', {}) or {}
             fs = op.get('fasesStatus', {}) or {}
             tk = op.get('ticket', {}) or {}
@@ -1830,6 +1848,50 @@ def crm_listar_oportunidades():
     if erro and not items:
         return jsonify({"error": erro}), 502
     return jsonify({"items": items, "total": len(items)})
+
+
+@app.route('/api/crm/sync-fases', methods=['POST'])
+def crm_sync_fases():
+    """Sincroniza a fase CACHEADA de TODAS as OS do usuário com a fase ATUAL no Omie.
+    A equipe move as oportunidades no funil do Omie (ex.: Aprovação→Preparação), mas o
+    draft guarda a fase de quando foi criado — então a aba 'Serviços a executar' (que
+    filtra por fase) escondia oportunidades que já estavam em Preparação. Aqui puxamos as
+    fases do Omie em poucas chamadas (não uma por OS) e atualizamos os drafts que mudaram.
+    A fase certa também importa pro crm-finalizar mandar pra fase de destino correta."""
+    user, full_data, err = _require_user()
+    if err:
+        return err
+    # Mapa: número/código da oportunidade -> fase atual no Omie (todas as fases do funil).
+    por_num, por_cod = {}, {}
+    try:
+        for fase in CRM_FASES:
+            for op in _omie_oportunidades_da_fase(fase):
+                ident = op.get('identificacao', {}) or {}
+                fs = op.get('fasesStatus', {}) or {}
+                f = fs.get('nCodFase') or fase
+                if ident.get('cNumOp'):
+                    por_num[str(ident['cNumOp'])] = f
+                if ident.get('nCodOp'):
+                    por_cod[int(ident['nCodOp'])] = f
+    except OmieError as e:
+        return jsonify({"error": f"Falha ao consultar o Omie: {e}"}), 502
+
+    atualizadas = 0
+    for draft in _user_drafts(full_data, user):
+        num = str(draft.get('crmOpNum') or '')
+        cod = draft.get('crmOpId')
+        nova = por_num.get(num)
+        if nova is None and cod is not None:
+            try:
+                nova = por_cod.get(int(cod))
+            except (TypeError, ValueError):
+                nova = None
+        if nova is not None and draft.get('crmFaseCodigo') != nova:
+            draft['crmFaseCodigo'] = nova
+            atualizadas += 1
+    if atualizadas:
+        save_data(full_data)
+    return jsonify({"success": True, "atualizadas": atualizadas})
 
 
 def _parse_omie_date(s):
@@ -5161,6 +5223,7 @@ HTML_PAGE = """
             const [execOs, setExecOs] = useState(null);
             const [execCarregando, setExecCarregando] = useState(false);
             const [execPecasSalvando, setExecPecasSalvando] = useState(false);
+            const [fasesSincronizando, setFasesSincronizando] = useState(false);
             // Aba "Teste e Liberação" (execEstado === 'aguardando_teste')
             const [testeAbertaId, setTesteAbertaId] = useState(null);
             const [testeMotivo, setTesteMotivo] = useState('');
@@ -5357,6 +5420,22 @@ HTML_PAGE = """
                 fetch('/api/os', { headers: { 'Authorization': auth.token } })
                     .then(r => r.json()).then(d => { if(Array.isArray(d)) setOsDrafts(d); });
             };
+            // Sincroniza a fase cacheada das OS com o Omie e recarrega. A equipe move as
+            // oportunidades no funil do Omie; sem isso, a aba "Serviços a executar" (filtra
+            // por fase) escondia oportunidades que já estavam em Preparação.
+            const sincronizarFases = async (silencioso = true) => {
+                setFasesSincronizando(true);
+                try {
+                    const r = await fetch('/api/crm/sync-fases', {
+                        method: 'POST', headers: { 'Authorization': auth.token }
+                    });
+                    const d = await r.json();
+                    await new Promise(res => { fetch('/api/os', { headers: { 'Authorization': auth.token } })
+                        .then(x => x.json()).then(list => { if (Array.isArray(list)) setOsDrafts(list); res(); }).catch(res); });
+                    if (!silencioso) alert(d && d.success ? `Sincronizado com o Omie. ${d.atualizadas || 0} OS atualizada(s).` : ('Erro: ' + ((d && d.error) || 'falha')));
+                } catch (e) { if (!silencioso) alert('Erro de rede: ' + (e.message || e)); }
+                finally { setFasesSincronizando(false); }
+            };
             // Abre uma OS da lista: mostra na hora (lista é enxuta, sem fotos de peça)
             // e em seguida troca pela versão COMPLETA (com fotos) vinda do GET /api/os/<id>.
             const abrirOsCompleta = (osParcial) => {
@@ -5389,6 +5468,11 @@ HTML_PAGE = """
                 // por isso ela também dispara o fetch. O resto é específico da aba de OS.
                 if (auth && ['os', 'executar', 'teste', 'historico'].includes(activeTab)) {
                     fetchOsDrafts();
+                }
+                // Ao abrir a bancada, sincroniza as fases com o Omie (traz as que foram
+                // movidas pra Preparação por fora do app). Roda em silêncio no fundo.
+                if (auth && activeTab === 'executar') {
+                    sincronizarFases(true);
                 }
                 if (auth && activeTab === 'os') {
                     if (!omieStatus.checked) checkOmieStatus();
@@ -8638,11 +8722,18 @@ HTML_PAGE = """
                 return html`
                     <div className="space-y-4">
                         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-                            <h2 className="text-xl font-semibold text-slate-800 flex items-center gap-2">
-                                <i className="ph-fill ph-wrench text-orange-500 text-2xl"></i> Serviços a executar
-                                <span className="text-sm font-normal text-slate-400">(${lista.length} em preparação)</span>
-                            </h2>
-                            <p className="text-sm text-slate-500 mt-1">Equipamentos liberados para manutenção. Marque cada serviço/peça conforme executar.</p>
+                            <div className="flex items-start justify-between gap-3 flex-wrap">
+                                <div>
+                                    <h2 className="text-xl font-semibold text-slate-800 flex items-center gap-2">
+                                        <i className="ph-fill ph-wrench text-orange-500 text-2xl"></i> Serviços a executar
+                                        <span className="text-sm font-normal text-slate-400">(${lista.length} em preparação)</span>
+                                    </h2>
+                                    <p className="text-sm text-slate-500 mt-1">Equipamentos liberados para manutenção. Marque cada serviço/peça conforme executar.</p>
+                                </div>
+                                <button onClick=${() => sincronizarFases(false)} disabled=${fasesSincronizando} className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-1 disabled:opacity-50">
+                                    <i className=${`ph-bold ph-arrows-clockwise ${fasesSincronizando ? 'animate-spin' : ''}`}></i> ${fasesSincronizando ? 'Sincronizando…' : 'Sincronizar com o Omie'}
+                                </button>
+                            </div>
                         </div>
 
                         ${!lista.length ? html`
